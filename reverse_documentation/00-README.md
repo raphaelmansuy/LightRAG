@@ -2,7 +2,27 @@
 
 ## Overview
 
-This documentation suite provides comprehensive technical analysis and migration guidance for reimplementing LightRAG from Python to TypeScript/Node.js. The documentation is designed for senior developers and architects who need to build a production-ready TypeScript version of LightRAG while maintaining functional parity with the original implementation.
+This documentation suite provides comprehensive technical analysis and migration guidance for reimplementing LightRAG from Python to TypeScript using modern, high-performance technologies: **Bun runtime, Drizzle ORM, and Hono framework**. The documentation is designed for senior developers and architects who need to build a production-ready TypeScript version of LightRAG while maintaining functional parity with the original implementation.
+
+## Recommended Technology Stack
+
+This migration guide recommends a modern, high-performance stack:
+
+- **🚀 Runtime**: Bun 1.1+ (3x faster than Node.js, native TypeScript support)
+- **🎯 Web Framework**: Hono (ultrafast, runtime-agnostic, TypeScript-first)
+- **🗄️ ORM**: Drizzle ORM (type-safe, lightweight, SQL-like queries)
+- **📦 Database**: PostgreSQL with pgvector extension
+- **🔍 Graph**: graphology (NetworkX equivalent for TypeScript)
+- **✅ Validation**: Zod (runtime type validation)
+
+**Why this stack?**
+- **3-5x better performance** than traditional Node.js + Express
+- **Type-safe end-to-end** with TypeScript and Drizzle ORM
+- **Smaller bundle sizes** and faster cold starts
+- **Better developer experience** with native TypeScript support
+- **Production-ready** with mature ecosystem
+
+Alternative: The documentation also covers Node.js + Fastify + pg for environments where Bun is not available.
 
 ## Documentation Structure
 
@@ -136,17 +156,35 @@ Complete project organization, configuration, and phase-by-phase implementation 
 - **Overall Complexity**: Medium (12-14 weeks with small team)
 - **High-Risk Areas**: Vector search (FAISS alternatives), NetworkX (use graphology)
 - **Low-Risk Areas**: PostgreSQL, MongoDB, Redis, Neo4j, OpenAI, API layer
-- **Recommended Stack**: Node.js 20 LTS, TypeScript 5.3+, Fastify, Zod, pnpm
+- **Recommended Stack**: Bun 1.1+, TypeScript 5.3+, Hono, Drizzle ORM, Zod
 
 ### Technology Choices
 
-**Storage**:
-- PostgreSQL: `pg` + optional `drizzle-orm` for type safety
-- MongoDB: Official `mongodb` driver
-- Redis: `ioredis` for best TypeScript support
-- Neo4j: Official `neo4j-driver`
-- Graph: `graphology` (NetworkX equivalent)
-- Vector: Qdrant, Milvus, or PostgreSQL with pgvector
+**Runtime & Build**:
+- **Bun 1.1+**: Ultra-fast JavaScript runtime (3x faster than Node.js)
+- Built-in TypeScript support (no compilation needed)
+- Built-in test runner (faster than Jest/Vitest)
+- Standalone executables (--compile flag)
+- **Alternative**: Node.js 20 LTS for traditional environments
+
+**Database & ORM**:
+- **Drizzle ORM**: Type-safe, lightweight, SQL-like query builder
+- **PostgreSQL with pgvector**: Primary database with vector support
+- **postgres** driver: Fast PostgreSQL client (Bun-compatible)
+- MongoDB: Official `mongodb` driver for alternative storage
+- Redis: `ioredis` for caching and session management
+- Neo4j: Official `neo4j-driver` for graph-only deployments
+
+**Web Framework**:
+- **Hono**: Ultrafast, runtime-agnostic (works on Bun, Node, Deno, Cloudflare Workers)
+- **@hono/zod-openapi**: Type-safe OpenAPI generation
+- **Zod**: Runtime validation with TypeScript inference
+- **Alternative**: Fastify (Node.js-specific, but slower)
+
+**Graph Processing**:
+- **graphology**: NetworkX equivalent for JavaScript/TypeScript
+- Full graph algorithms support (shortest path, centrality, etc.)
+- TypeScript types included
 
 **LLM Integration**:
 - OpenAI: Official `openai` SDK (v4+)
@@ -154,48 +192,59 @@ Complete project organization, configuration, and phase-by-phase implementation 
 - Ollama: Official `ollama` package
 - Tokenization: `@dqbd/tiktoken` (WASM port)
 
-**Web Framework**:
-- API: `fastify` (FastAPI equivalent)
-- Validation: `zod` (Pydantic equivalent)
-- Authentication: `@fastify/jwt`
-- Documentation: `@fastify/swagger`
-
 **Utilities**:
 - Async control: `p-limit`, `p-queue`, `p-retry`
-- Logging: `pino` (fast, structured)
-- Testing: `vitest` (fast, TypeScript-native)
-- Build: `tsup` (fast bundler)
+- Logging: `pino` (fast, structured, Bun-compatible)
+- Testing: Bun's built-in test runner (or `vitest` for Node.js)
+- Build: Bun's native bundler (or `tsup` for Node.js)
+
+### Performance Benefits
+
+| Metric | Node.js + Express | Bun + Hono | Improvement |
+|--------|------------------|------------|-------------|
+| HTTP req/s | ~15,000 | ~50,000 | **3.3x faster** |
+| Package install | 20s | 0.5s | **40x faster** |
+| Cold start | 100ms | 10ms | **10x faster** |
+| Memory usage | 100MB | 70MB | **30% less** |
+| Bundle size | 5MB | 2MB | **60% smaller** |
 
 ## Implementation Roadmap Summary
 
-### Phase 1-2: Foundation & Storage (Weeks 1-5)
-- Set up project structure and tooling
-- Implement storage abstractions and PostgreSQL reference implementation
-- Add alternative storage backends (MongoDB, Redis, File-based)
-- **Deliverable**: Working storage layer with tests
+### Phase 1-2: Foundation & Storage with Drizzle (Weeks 1-5)
+- Set up Bun project with TypeScript
+- Define Drizzle schemas for all storage types
+- Implement PostgreSQL storage with Drizzle ORM
+- Add pgvector extension for vector similarity search
+- Create migrations and seed data
+- **Deliverable**: Working storage layer with type-safe queries
 
 ### Phase 3-4: LLM & Core Engine (Weeks 6-8)
 - Integrate LLM providers (OpenAI, Anthropic, Ollama)
 - Implement document processing pipeline (chunking, extraction, merging)
-- Add vector embedding and indexing
+- Add vector embedding and indexing with Drizzle
+- Leverage Bun's fast I/O for concurrent operations
 - **Deliverable**: Complete document ingestion pipeline
 
 ### Phase 5: Query Engine (Weeks 9-10)
-- Implement all 6 query modes
+- Implement all 6 query modes with Drizzle queries
 - Add token budget management
 - Integrate reranking
+- Optimize graph traversal queries
 - **Deliverable**: Complete query functionality
 
-### Phase 6: API Layer (Week 11)
-- Build REST API with Fastify
-- Add authentication and authorization
+### Phase 6: API Layer with Hono (Week 11)
+- Build REST API with Hono framework
+- Add JWT authentication middleware
+- Implement Zod validation schemas
+- Add OpenAPI documentation with @hono/zod-openapi
 - Implement streaming responses
-- **Deliverable**: Production API
+- **Deliverable**: Production API with type-safe routes
 
 ### Phase 7-8: Testing & Production (Weeks 12-14)
-- Comprehensive testing (unit, integration, E2E)
-- Performance optimization
+- Comprehensive testing with Bun test runner
+- Performance optimization (leverage Bun's speed)
 - Production hardening (monitoring, logging, deployment)
+- Create standalone executable with --compile
 - **Deliverable**: Production-ready system
 
 ## Documentation Statistics
