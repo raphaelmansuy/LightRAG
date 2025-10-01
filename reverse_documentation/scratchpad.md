@@ -58,27 +58,60 @@ TypeScript/React frontend - already exists! This provides reference for:
 
 ## Documentation Progress - Update
 
-### Completed Documents (4/8):
+### Completed Documents (6/8):
 1. ✅ Executive Summary (16KB) - Complete system overview
-2. ✅ Architecture Documentation (33KB) - 6 comprehensive Mermaid diagrams
-3. ✅ Data Models and Schemas (27KB) - Complete type system
-4. ✅ Dependency Migration Guide (27KB) - Full npm mapping with complexity assessment
+2. ✅ Architecture Documentation (36KB) - 6 comprehensive Mermaid diagrams
+3. ✅ Data Models and Schemas (28KB) - Complete type system
+4. ✅ Dependency Migration Guide (28KB) - Full npm mapping with complexity assessment
+5. ✅ TypeScript Project Structure and Migration Roadmap (32KB) - Complete implementation plan
+6. ✅ Implementation Guide (28KB) - Key patterns and best practices
 
-### Next Priority Documents:
-5. Storage Layer Implementation Guide - Deep dive into each storage backend
-6. TypeScript Project Structure and Migration Roadmap
-7. LLM Integration Patterns
-8. API Reference with TypeScript Types
+### Enhancement Needed for Bun + Drizzle + Hono:
+The current documentation uses Node.js + Fastify + pg, but needs to be updated for:
+- **Bun Runtime**: Fast JavaScript runtime with built-in TypeScript support
+- **Drizzle ORM**: Type-safe SQL query builder (mentioned but not fully integrated)
+- **Hono**: Ultrafast web framework (alternative to Fastify/Express)
 
-### Key Insights for Remaining Docs:
-- Focus on practical implementation examples
-- Include performance considerations
-- Document error handling patterns
-- Provide testing strategies
-- Add deployment configurations
+### Key Changes Required:
 
-### Total Documentation So Far:
-- ~103KB of technical documentation
-- 6 Mermaid architecture diagrams
-- 50+ code comparison examples
+#### 1. Runtime: Node.js → Bun
+- Replace Node.js references with Bun
+- Update package.json scripts for Bun
+- Add Bun-specific configurations
+- Update deployment guides for Bun
+
+#### 2. Web Framework: Fastify → Hono
+- Replace all Fastify examples with Hono
+- Update API routing patterns
+- Adapt middleware patterns for Hono
+- Update OpenAPI/Swagger integration
+
+#### 3. ORM: pg → Drizzle ORM
+- Expand Drizzle ORM coverage (currently minimal)
+- Add schema definitions with Drizzle
+- Update all database queries to use Drizzle
+- Add migration scripts with Drizzle Kit
+- Document connection pooling with Drizzle
+
+#### 4. Features Coverage Check:
+- ✅ Document processing pipeline
+- ✅ Entity extraction
+- ✅ Graph construction and merging
+- ✅ Query modes (local, global, hybrid, mix, naive, bypass)
+- ✅ Multiple storage backends
+- ✅ LLM provider integrations
+- ✅ Vector embeddings
+- ✅ Authentication (JWT)
+- ✅ WebUI integration
+- ✅ Streaming responses
+- ✅ Pipeline status tracking
+- ✅ Error handling and retry logic
+- ✅ Reranking support
+- ✅ Ollama compatibility
+
+### Total Documentation:
+- ~184KB of technical documentation (5 major docs + README + Implementation Guide)
+- 6+ Mermaid architecture diagrams
+- 100+ code comparison examples
 - Complete dependency mapping for 40+ packages
+- 14-week migration roadmap
