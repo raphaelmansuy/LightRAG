@@ -906,8 +906,9 @@ class LightRAG:
         ids: str | list[str] | None = None,
         file_paths: str | list[str] | None = None,
         track_id: str | None = None,
+        tenant_context: Optional[Any] = None,
     ) -> str:
-        """Async Insert documents with checkpoint support
+        """Async Insert documents with checkpoint support and optional tenant context
 
         Args:
             input: Single document string or list of document strings
@@ -918,6 +919,8 @@ class LightRAG:
             ids: list of unique document IDs, if not provided, MD5 hash IDs will be generated
             file_paths: list of file paths corresponding to each document, used for citation
             track_id: tracking ID for monitoring processing status, if not provided, will be generated
+            tenant_context: Optional TenantContext for multi-tenant deployments. If provided, tenant_id and kb_id
+                from context will be propagated to storage operations for proper isolation.
 
         Returns:
             str: tracking ID for monitoring processing status
@@ -925,6 +928,11 @@ class LightRAG:
         # Generate track_id if not provided
         if track_id is None:
             track_id = generate_track_id("insert")
+
+        # Store tenant context for propagation to storage operations
+        if tenant_context:
+            self._tenant_id = tenant_context.tenant_id
+            self._kb_id = tenant_context.kb_id
 
         await self.apipeline_enqueue_documents(input, ids, file_paths, track_id)
         await self.apipeline_process_enqueue_documents(
@@ -2060,6 +2068,7 @@ class LightRAG:
         query: str,
         param: QueryParam = QueryParam(),
         system_prompt: str | None = None,
+        tenant_context: Optional[Any] = None,
     ) -> str | AsyncIterator[str]:
         """
         Perform a async query (backward compatibility wrapper).
@@ -2072,12 +2081,19 @@ class LightRAG:
             param (QueryParam): Configuration parameters for query execution.
                 If param.model_func is provided, it will be used instead of the global model.
             system_prompt (Optional[str]): Custom prompts for fine-tuned control over the system's behavior. Defaults to None, which uses PROMPTS["rag_response"].
+            tenant_context: Optional TenantContext for multi-tenant deployments. If provided, query execution will
+                be scoped to the specified tenant and knowledge base for proper data isolation.
 
         Returns:
             str | AsyncIterator[str]: The LLM response content.
                 - Non-streaming: Returns str
                 - Streaming: Returns AsyncIterator[str]
         """
+        # Store tenant context for propagation to storage operations
+        if tenant_context:
+            self._tenant_id = tenant_context.tenant_id
+            self._kb_id = tenant_context.kb_id
+
         # Call the new aquery_llm function to get complete results
         result = await self.aquery_llm(query, param, system_prompt)
 
@@ -2114,6 +2130,7 @@ class LightRAG:
         self,
         query: str,
         param: QueryParam = QueryParam(),
+        tenant_context: Optional[Any] = None,
     ) -> dict[str, Any]:
         """
         Asynchronous data retrieval API: returns structured retrieval results without LLM generation.
@@ -2124,6 +2141,8 @@ class LightRAG:
         Args:
             query: Query text for retrieval.
             param: Query parameters controlling retrieval behavior (same as aquery).
+            tenant_context: Optional TenantContext for multi-tenant deployments. If provided, query execution will
+                be scoped to the specified tenant and knowledge base for proper data isolation.
 
         Returns:
             dict[str, Any]: Structured data result in the following format:
@@ -2221,6 +2240,11 @@ class LightRAG:
             actual data is nested under the 'data' field, with 'status' and 'message'
             fields at the top level.
         """
+        # Store tenant context for propagation to storage operations
+        if tenant_context:
+            self._tenant_id = tenant_context.tenant_id
+            self._kb_id = tenant_context.kb_id
+
         global_config = asdict(self)
 
         # Create a copy of param to avoid modifying the original
@@ -2567,7 +2591,7 @@ class LightRAG:
         # Return the dictionary containing statuses only for the found document IDs
         return found_statuses
 
-    async def adelete_by_doc_id(self, doc_id: str) -> DeletionResult:
+    async def adelete_by_doc_id(self, doc_id: str, tenant_context: Optional[Any] = None) -> DeletionResult:
         """Delete a document and all its related data, including chunks, graph elements, and cached entries.
 
         This method orchestrates a comprehensive deletion process for a given document ID.
@@ -2576,6 +2600,8 @@ class LightRAG:
 
         Args:
             doc_id (str): The unique identifier of the document to be deleted.
+            tenant_context: Optional TenantContext for multi-tenant deployments. If provided, deletion will
+                be scoped to the specified tenant and knowledge base.
 
         Returns:
             DeletionResult: An object containing the outcome of the deletion process.
@@ -2585,6 +2611,11 @@ class LightRAG:
                 - `status_code` (int): HTTP status code (e.g., 200, 404, 500).
                 - `file_path` (str | None): The file path of the deleted document, if available.
         """
+        # Store tenant context for propagation to storage operations
+        if tenant_context:
+            self._tenant_id = tenant_context.tenant_id
+            self._kb_id = tenant_context.kb_id
+
         deletion_operations_started = False
         original_exception = None
 

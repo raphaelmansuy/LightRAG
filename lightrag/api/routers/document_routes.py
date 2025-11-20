@@ -25,6 +25,8 @@ from lightrag import LightRAG
 from lightrag.base import DeletionResult, DocProcessingStatus, DocStatus
 from lightrag.utils import generate_track_id
 from lightrag.api.utils_api import get_combined_auth_dependency
+from lightrag.api.dependencies import get_tenant_context_optional
+from lightrag.models.tenant import TenantContext
 from ..config import global_args
 
 
@@ -1669,7 +1671,10 @@ def create_document_routes(
     @router.post(
         "/scan", response_model=ScanResponse, dependencies=[Depends(combined_auth)]
     )
-    async def scan_for_new_documents(background_tasks: BackgroundTasks):
+    async def scan_for_new_documents(
+        background_tasks: BackgroundTasks,
+        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional)
+    ):
         """
         Trigger the scanning process for new documents.
 
@@ -1695,7 +1700,9 @@ def create_document_routes(
         "/upload", response_model=InsertResponse, dependencies=[Depends(combined_auth)]
     )
     async def upload_to_input_dir(
-        background_tasks: BackgroundTasks, file: UploadFile = File(...)
+        background_tasks: BackgroundTasks,
+        file: UploadFile = File(...),
+        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional)
     ):
         """
         Upload a file to the input directory and index it.

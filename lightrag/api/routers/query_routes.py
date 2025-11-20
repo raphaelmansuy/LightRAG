@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from lightrag.base import QueryParam
 from lightrag.api.utils_api import get_combined_auth_dependency
+from lightrag.api.dependencies import get_tenant_context_optional
+from lightrag.models.tenant import TenantContext
 from pydantic import BaseModel, Field, field_validator
 
 from ascii_colors import trace_exception
@@ -267,7 +269,10 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             },
         },
     )
-    async def query_text(request: QueryRequest):
+    async def query_text(
+        request: QueryRequest,
+        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional)
+    ):
         """
         Comprehensive RAG query endpoint with non-streaming response. Parameter "stream" is ignored.
 
@@ -438,7 +443,10 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             },
         },
     )
-    async def query_text_stream(request: QueryRequest):
+    async def query_text_stream(
+        request: QueryRequest,
+        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional)
+    ):
         """
         Advanced RAG query endpoint with flexible streaming response.
 
@@ -907,7 +915,10 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             },
         },
     )
-    async def query_data(request: QueryRequest):
+    async def query_data(
+        request: QueryRequest,
+        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional)
+    ):
         """
         Advanced data retrieval endpoint for structured RAG analysis.
 

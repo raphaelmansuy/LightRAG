@@ -50,6 +50,9 @@ from lightrag.api.routers.document_routes import (
 from lightrag.api.routers.query_routes import create_query_routes
 from lightrag.api.routers.graph_routes import create_graph_routes
 from lightrag.api.routers.ollama_api import OllamaAPI
+from lightrag.api.routers.tenant_routes import create_tenant_routes
+from lightrag.services.tenant_service import TenantService
+from lightrag.tenant_rag_manager import TenantRAGManager
 
 from lightrag.utils import logger, set_verbose_debug
 from lightrag.kg.shared_storage import (
@@ -629,7 +632,20 @@ def create_app(args):
         logger.error(f"Failed to initialize LightRAG: {e}")
         raise
 
-    # Add routes
+    # Initialize TenantService for multi-tenant support
+    tenant_service = TenantService()
+    
+    # Initialize TenantRAGManager for managing per-tenant RAG instances with caching
+    # This enables efficient multi-tenant deployments by caching RAG instances
+    rag_manager = TenantRAGManager(
+        base_working_dir=args.working_dir,
+        tenant_service=tenant_service,
+        max_cached_instances=int(os.getenv("MAX_CACHED_RAG_INSTANCES", "100"))
+    )
+    
+    # Store rag_manager in app state for dependency injection
+    app.state.rag_manager = rag_manager
+    app.include_router(create_tenant_routes(tenant_service))
     app.include_router(
         create_document_routes(
             rag,

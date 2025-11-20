@@ -175,6 +175,10 @@ class StorageNameSpace(ABC):
     namespace: str
     workspace: str
     global_config: dict[str, Any]
+    tenant_id: Optional[str]
+    """Optional tenant ID for multi-tenant deployments. Set by subclasses."""
+    kb_id: Optional[str]
+    """Optional knowledge base ID for multi-tenant deployments. Set by subclasses."""
 
     async def initialize(self):
         """Initialize the storage"""
@@ -183,6 +187,25 @@ class StorageNameSpace(ABC):
     async def finalize(self):
         """Finalize the storage"""
         pass
+    
+    def _get_composite_workspace(self) -> str:
+        """Get the composite workspace namespace for multi-tenant isolation.
+        
+        Returns the workspace with tenant/kb prefix if multi-tenancy is enabled (tenant_id is set).
+        Otherwise returns the regular workspace for backward compatibility.
+        
+        Returns:
+            str: Composite workspace identifier in format "tenant_id:kb_id:workspace" for multi-tenant,
+                 or just "workspace" for single-tenant/legacy mode
+        """
+        tenant_id = getattr(self, 'tenant_id', None)
+        kb_id = getattr(self, 'kb_id', None)
+        
+        if tenant_id and kb_id:
+            return f"{tenant_id}:{kb_id}:{self.workspace}"
+        elif tenant_id:
+            return f"{tenant_id}:{self.workspace}"
+        return self.workspace
 
     @abstractmethod
     async def index_done_callback(self) -> None:
