@@ -175,9 +175,9 @@ class StorageNameSpace(ABC):
     namespace: str
     workspace: str
     global_config: dict[str, Any]
-    tenant_id: Optional[str]
+    tenant_id: Optional[str] = None
     """Optional tenant ID for multi-tenant deployments. Set by subclasses."""
-    kb_id: Optional[str]
+    kb_id: Optional[str] = None
     """Optional knowledge base ID for multi-tenant deployments. Set by subclasses."""
 
     async def initialize(self):
@@ -240,7 +240,7 @@ class StorageNameSpace(ABC):
 
 @dataclass
 class BaseVectorStorage(StorageNameSpace, ABC):
-    embedding_func: EmbeddingFunc
+    embedding_func: EmbeddingFunc = None
     cosine_better_than_threshold: float = field(default=0.2)
     meta_fields: set[str] = field(default_factory=set)
 
@@ -340,7 +340,7 @@ class BaseVectorStorage(StorageNameSpace, ABC):
 
 @dataclass
 class BaseKVStorage(StorageNameSpace, ABC):
-    embedding_func: EmbeddingFunc
+    embedding_func: EmbeddingFunc = None
 
     @abstractmethod
     async def get_by_id(self, id: str) -> dict[str, Any] | None:
@@ -383,7 +383,7 @@ class BaseKVStorage(StorageNameSpace, ABC):
 class BaseGraphStorage(StorageNameSpace, ABC):
     """All operations related to edges in graph should be undirected."""
 
-    embedding_func: EmbeddingFunc
+    embedding_func: EmbeddingFunc = None
 
     @abstractmethod
     async def has_node(self, node_id: str) -> bool:

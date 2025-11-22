@@ -6,10 +6,12 @@ handling initialization, caching, cleanup, and proper isolation between tenants.
 """
 
 from typing import Dict, Optional, Tuple
+from pathlib import Path
 from lightrag import LightRAG
 from lightrag.models.tenant import TenantContext, TenantConfig, Tenant
 from lightrag.services.tenant_service import TenantService
 from lightrag.utils import logger
+from lightrag.security import validate_uuid, validate_working_directory
 import asyncio
 import os
 
@@ -30,6 +32,7 @@ class TenantRAGManager:
         self,
         base_working_dir: str,
         tenant_service: TenantService,
+        template_rag: Optional[LightRAG] = None,
         max_cached_instances: int = 100,
     ):
         """
@@ -38,23 +41,26 @@ class TenantRAGManager:
         Args:
             base_working_dir: Base directory for all tenant/KB data storage
             tenant_service: Service for retrieving tenant configuration
+            template_rag: Template RAG instance to copy configuration from
             max_cached_instances: Maximum number of LightRAG instances to keep cached
         """
         self.base_working_dir = base_working_dir
         self.tenant_service = tenant_service
+        self.template_rag = template_rag
         self.max_cached_instances = max_cached_instances
         self._instances: Dict[Tuple[str, str], LightRAG] = {}
         self._lock = asyncio.Lock()
         self._access_order: list[Tuple[str, str]] = []  # Track access order for LRU
         logger.info(
             f"TenantRAGManager initialized with base_dir={base_working_dir}, "
-            f"max_instances={max_cached_instances}"
+            f"max_instances={max_cached_instances}, template_rag={template_rag is not None}"
         )
     
     async def get_rag_instance(
         self,
         tenant_id: str,
         kb_id: str,
+        user_id: Optional[str] = None,
     ) -> LightRAG:
         """
         Get or create a LightRAG instance for a tenant/KB combination.
@@ -62,17 +68,26 @@ class TenantRAGManager:
         This method implements double-check locking to avoid race conditions
         when multiple requests try to initialize the same instance concurrently.
         Instances are cached and reused across requests for the same tenant/KB.
+        
+        SECURITY: Validates user has access to requested tenant before returning instance.
 
         Args:
-            tenant_id: The tenant ID
-            kb_id: The knowledge base ID
+            tenant_id: The tenant ID (must be valid UUID)
+            kb_id: The knowledge base ID (must be valid UUID)
+            user_id: User identifier from JWT token (required for security validation)
 
         Returns:
             LightRAG: A properly initialized LightRAG instance for this tenant/KB
 
         Raises:
             ValueError: If the tenant does not exist or is inactive
+            PermissionError: If user does not have access to the tenant
+            HTTPException: If tenant_id or kb_id are invalid UUIDs
         """
+        # SECURITY: Validate UUID format to prevent injection attacks
+        tenant_id = validate_uuid(tenant_id, "tenant_id")
+        kb_id = validate_uuid(kb_id, "kb_id")
+        
         cache_key = (tenant_id, kb_id)
         
         # First check (fast path - no lock)
@@ -103,32 +118,74 @@ class TenantRAGManager:
             if not tenant or not tenant.is_active:
                 raise ValueError(f"Tenant {tenant_id} not found or inactive")
             
-            # Create tenant-specific working directory
-            tenant_working_dir = os.path.join(
+            # SECURITY: Verify user has access to this tenant
+            if user_id:
+                has_access = await self.tenant_service.verify_user_access(user_id, tenant_id)
+                if not has_access:
+                    logger.warning(
+                        f"Access denied: user={user_id} attempted to access tenant={tenant_id}"
+                    )
+                    raise PermissionError(f"Access denied to tenant {tenant_id}")
+            else:
+                logger.warning(
+                    f"No user_id provided for tenant access - allowing for backward compatibility"
+                )
+            
+            # SECURITY: Create and validate tenant-specific working directory
+            # This prevents path traversal attacks
+            tenant_working_dir, composite_workspace = validate_working_directory(
                 self.base_working_dir,
                 tenant_id,
                 kb_id
             )
             os.makedirs(tenant_working_dir, exist_ok=True)
             
-            # Create composite workspace name for isolation
-            # Format: tenant_id:kb_id to ensure complete isolation
-            composite_workspace = f"{tenant_id}:{kb_id}"
-            
             try:
                 # Create LightRAG instance with tenant-specific configuration
-                instance = LightRAG(
-                    working_dir=tenant_working_dir,
-                    workspace=composite_workspace,
-                    # Use tenant-specific storage backends (can be configured per tenant)
-                    kv_storage=tenant.config.custom_metadata.get("kv_storage", "JsonKVStorage"),
-                    vector_storage=tenant.config.custom_metadata.get("vector_storage", "NanoVectorDBStorage"),
-                    graph_storage=tenant.config.custom_metadata.get("graph_storage", "NetworkXStorage"),
-                    # Use tenant-specific models and settings
-                    top_k=tenant.config.top_k,
-                    chunk_top_k=getattr(tenant.config, "chunk_top_k", 40),
-                    cosine_threshold=tenant.config.cosine_threshold,
-                )
+                # Use template RAG configuration if available, otherwise use defaults
+                if self.template_rag:
+                    # Copy configuration from template RAG
+                    instance = LightRAG(
+                        working_dir=tenant_working_dir,
+                        workspace=composite_workspace,
+                        llm_model_func=self.template_rag.llm_model_func,
+                        llm_model_name=self.template_rag.llm_model_name,
+                        llm_model_max_async=self.template_rag.llm_model_max_async,
+                        llm_model_kwargs=self.template_rag.llm_model_kwargs,
+                        embedding_func=self.template_rag.embedding_func,
+                        default_llm_timeout=self.template_rag.default_llm_timeout,
+                        default_embedding_timeout=self.template_rag.default_embedding_timeout,
+                        kv_storage=tenant.config.custom_metadata.get("kv_storage") or self.template_rag.kv_storage,
+                        vector_storage=tenant.config.custom_metadata.get("vector_storage") or self.template_rag.vector_storage,
+                        graph_storage=tenant.config.custom_metadata.get("graph_storage") or self.template_rag.graph_storage,
+                        doc_status_storage=self.template_rag.doc_status_storage,
+                        vector_db_storage_cls_kwargs=self.template_rag.vector_db_storage_cls_kwargs,
+                        enable_llm_cache=self.template_rag.enable_llm_cache,
+                        enable_llm_cache_for_entity_extract=self.template_rag.enable_llm_cache_for_entity_extract,
+                        rerank_model_func=self.template_rag.rerank_model_func,
+                        chunk_token_size=self.template_rag.chunk_token_size,
+                        chunk_overlap_token_size=self.template_rag.chunk_overlap_token_size,
+                        max_parallel_insert=self.template_rag.max_parallel_insert,
+                        max_graph_nodes=self.template_rag.max_graph_nodes,
+                        addon_params=self.template_rag.addon_params,
+                        ollama_server_infos=getattr(self.template_rag, 'ollama_server_infos', None),
+                        # Override with tenant-specific settings
+                        top_k=tenant.config.top_k,
+                        chunk_top_k=getattr(tenant.config, "chunk_top_k", 40),
+                        cosine_threshold=tenant.config.cosine_threshold,
+                    )
+                else:
+                    # Fallback to basic configuration (will likely fail without embedding_func)
+                    instance = LightRAG(
+                        working_dir=tenant_working_dir,
+                        workspace=composite_workspace,
+                        kv_storage=tenant.config.custom_metadata.get("kv_storage", "JsonKVStorage"),
+                        vector_storage=tenant.config.custom_metadata.get("vector_storage", "NanoVectorDBStorage"),
+                        graph_storage=tenant.config.custom_metadata.get("graph_storage", "NetworkXStorage"),
+                        top_k=tenant.config.top_k,
+                        chunk_top_k=getattr(tenant.config, "chunk_top_k", 40),
+                        cosine_threshold=tenant.config.cosine_threshold,
+                    )
                 
                 # Initialize the instance's storages
                 await instance.initialize_storages()

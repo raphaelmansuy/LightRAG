@@ -10,6 +10,7 @@ import numpy as np
 import configparser
 import ssl
 import itertools
+import hashlib
 
 from lightrag.types import KnowledgeGraph, KnowledgeGraphNode, KnowledgeGraphEdge
 
@@ -32,6 +33,7 @@ from ..namespace import NameSpace, is_namespace
 from ..utils import logger
 from ..constants import GRAPH_FIELD_SEP
 from ..kg.shared_storage import get_data_init_lock, get_graph_db_lock, get_storage_lock
+from ..utils_context import get_current_tenant_id
 
 import pipmaster as pm
 
@@ -1049,9 +1051,7 @@ class PostgreSQLDB:
                     try:
                         # Create index for id column
                         index_name = f"idx_{table_name.lower()}_id"
-                        create_index_sql = (
-                            f"CREATE INDEX {index_name} ON {table_name}(id)"
-                        )
+                        create_index_sql = f"CREATE INDEX {index_name} ON {table_name}(id)"
                         await self.execute(create_index_sql)
                         logger.info(f"Created index {index_name} on table {table_name}")
 
@@ -1222,6 +1222,11 @@ class PostgreSQLDB:
         graph_name: str | None = None,
     ) -> dict[str, Any] | None | list[dict[str, Any]]:
         async with self.pool.acquire() as connection:  # type: ignore
+            # Set tenant context if available
+            tenant_id = get_current_tenant_id()
+            if tenant_id:
+                await connection.execute(f"SET app.current_tenant = '{tenant_id}'")
+
             if with_age and graph_name:
                 await self.configure_age(connection, graph_name)  # type: ignore
             elif with_age and not graph_name:
@@ -1229,24 +1234,15 @@ class PostgreSQLDB:
 
             try:
                 if params:
-                    rows = await connection.fetch(sql, *params)
-                else:
-                    rows = await connection.fetch(sql)
-
-                if multirows:
-                    if rows:
-                        columns = [col for col in rows[0].keys()]
-                        data = [dict(zip(columns, row)) for row in rows]
+                    if multirows:
+                        return await connection.fetch(sql, *params)
                     else:
-                        data = []
+                        return await connection.fetchrow(sql, *params)
                 else:
-                    if rows:
-                        columns = rows[0].keys()
-                        data = dict(zip(columns, rows[0]))
+                    if multirows:
+                        return await connection.fetch(sql)
                     else:
-                        data = None
-
-                return data
+                        return await connection.fetchrow(sql)
             except Exception as e:
                 logger.error(f"PostgreSQL database, error:{e}")
                 raise
@@ -1262,6 +1258,11 @@ class PostgreSQLDB:
     ):
         try:
             async with self.pool.acquire() as connection:  # type: ignore
+                # Set tenant context if available
+                tenant_id = get_current_tenant_id()
+                if tenant_id:
+                    await connection.execute(f"SET app.current_tenant = '{tenant_id}'")
+
                 if with_age and graph_name:
                     await self.configure_age(connection, graph_name)
                 elif with_age and not graph_name:
@@ -1421,6 +1422,9 @@ class PGKVStorage(BaseKVStorage):
                 # Use "default" for compatibility (lowest priority)
                 self.workspace = "default"
 
+            # Apply multi-tenant isolation
+            self.workspace = self._get_composite_workspace()
+
     async def finalize(self):
         async with get_storage_lock():
             if self.db is not None:
@@ -1471,6 +1475,7 @@ class PGKVStorage(BaseKVStorage):
             if is_namespace(self.namespace, NameSpace.KV_STORE_TEXT_CHUNKS):
                 processed_results = {}
                 for row in results:
+                    row = dict(row)
                     llm_cache_list = row.get("llm_cache_list", [])
                     if isinstance(llm_cache_list, str):
                         try:
@@ -1491,6 +1496,7 @@ class PGKVStorage(BaseKVStorage):
             if is_namespace(self.namespace, NameSpace.KV_STORE_FULL_ENTITIES):
                 processed_results = {}
                 for row in results:
+                    row = dict(row)
                     entity_names = row.get("entity_names", [])
                     if isinstance(entity_names, str):
                         try:
@@ -1511,6 +1517,7 @@ class PGKVStorage(BaseKVStorage):
             if is_namespace(self.namespace, NameSpace.KV_STORE_FULL_RELATIONS):
                 processed_results = {}
                 for row in results:
+                    row = dict(row)
                     relation_pairs = row.get("relation_pairs", [])
                     if isinstance(relation_pairs, str):
                         try:
@@ -1540,6 +1547,9 @@ class PGKVStorage(BaseKVStorage):
         sql = SQL_TEMPLATES["get_by_id_" + self.namespace]
         params = {"workspace": self.workspace, "id": id}
         response = await self.db.query(sql, list(params.values()))
+        
+        if response:
+            response = dict(response)
 
         if response and is_namespace(self.namespace, NameSpace.KV_STORE_TEXT_CHUNKS):
             # Parse llm_cache_list JSON string back to list
@@ -1620,6 +1630,9 @@ class PGKVStorage(BaseKVStorage):
         )
         params = {"workspace": self.workspace}
         results = await self.db.query(sql, list(params.values()), multirows=True)
+        
+        if results:
+            results = [dict(r) for r in results]
 
         if results and is_namespace(self.namespace, NameSpace.KV_STORE_TEXT_CHUNKS):
             # Parse llm_cache_list JSON string back to list for each result
@@ -1799,6 +1812,28 @@ class PGKVStorage(BaseKVStorage):
                     "update_time": current_time,
                 }
                 await self.db.execute(upsert_sql, _data)
+        elif is_namespace(self.namespace, NameSpace.KV_STORE_TENANTS):
+            for k, v in data.items():
+                upsert_sql = SQL_TEMPLATES["upsert_tenants"]
+                _data = {
+                    "workspace": self.workspace,
+                    "id": k,
+                    "data": json.dumps(v),
+                    "create_time": v.get("create_time"),
+                    "update_time": v.get("update_time"),
+                }
+                await self.db.execute(upsert_sql, _data)
+        elif is_namespace(self.namespace, NameSpace.KV_STORE_KNOWLEDGE_BASES):
+            for k, v in data.items():
+                upsert_sql = SQL_TEMPLATES["upsert_knowledge_bases"]
+                _data = {
+                    "workspace": self.workspace,
+                    "id": k,
+                    "data": json.dumps(v),
+                    "create_time": v.get("create_time"),
+                    "update_time": v.get("update_time"),
+                }
+                await self.db.execute(upsert_sql, _data)
 
     async def index_done_callback(self) -> None:
         # PG handles persistence automatically
@@ -1885,6 +1920,9 @@ class PGVectorStorage(BaseVectorStorage):
             else:
                 # Use "default" for compatibility (lowest priority)
                 self.workspace = "default"
+
+            # Apply multi-tenant isolation
+            self.workspace = self._get_composite_workspace()
 
     async def finalize(self):
         async with get_storage_lock():
@@ -2556,7 +2594,7 @@ class PGDocStatusStorage(DocStatusStorage):
 
     async def get_docs_paginated(
         self,
-        status_filter: DocStatus | None = None,
+        status_filter: DocStatus | None,
         page: int = 1,
         page_size: int = 50,
         sort_field: str = "updated_at",
@@ -2869,7 +2907,19 @@ class PGGraphStorage(BaseGraphStorage):
             # Ensure names comply with PostgreSQL identifier specifications
             safe_workspace = re.sub(r"[^a-zA-Z0-9_]", "_", workspace.strip())
             safe_namespace = re.sub(r"[^a-zA-Z0-9_]", "_", namespace)
-            return f"{safe_workspace}_{safe_namespace}"
+            graph_name = f"{safe_workspace}_{safe_namespace}"
+            
+            # Ensure graph name starts with a letter (AGE requirement)
+            if not graph_name[0].isalpha():
+                graph_name = f"g_{graph_name}"
+            
+            # PostgreSQL identifier limit is 63 bytes
+            if len(graph_name) > 63:
+                # Use MD5 hash to ensure uniqueness and fit within limit
+                hash_object = hashlib.md5(graph_name.encode())
+                graph_name = f"g_{hash_object.hexdigest()}"
+                
+            return graph_name
         else:
             # When the workspace is "default", use the namespace directly (for backward compatibility with legacy implementations)
             return re.sub(r"[^a-zA-Z0-9_]", "_", namespace)
@@ -3118,6 +3168,7 @@ class PGGraphStorage(BaseGraphStorage):
         Returns:
             list[dict[str, Any]]: a list of dictionaries containing the result set
         """
+        logger.info(f"[{self.workspace}] Executing query: {query}")
         try:
             if readonly:
                 data = await self.db.query(
@@ -3308,7 +3359,6 @@ class PGGraphStorage(BaseGraphStorage):
             raise
 
     @retry(
-        stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
         retry=retry_if_exception_type((PGGraphQueryException,)),
     )
@@ -3564,8 +3614,10 @@ class PGGraphStorage(BaseGraphStorage):
                 node_id = row["node_id"]
                 if not node_id:
                     continue
-                out_degrees[node_id] = int(row.get("out_degree", 0) or 0)
-                in_degrees[node_id] = int(row.get("in_degree", 0) or 0)
+                out_degree = out_degrees.get(node_id, 0)
+                in_degree = in_degrees.get(node_id, 0)
+                out_degrees[node_id] = out_degree + int(row.get("out_degree", 0) or 0)
+                in_degrees[node_id] = in_degree + int(row.get("in_degree", 0) or 0)
 
         degrees_dict = {}
         for node_id in node_ids:
@@ -3669,15 +3721,13 @@ class PGGraphStorage(BaseGraphStorage):
             SELECT * FROM cypher({dollar_quote(self.graph_name)}::name,
                                  {dollar_quote(forward_cypher)}::cstring,
                                  $1::agtype)
-              AS (source text, target text, edge_properties agtype)
-            """
+              AS (source text, target text, edge_properties agtype)"""
 
             sql_bwd = f"""
             SELECT * FROM cypher({dollar_quote(self.graph_name)}::name,
                                  {dollar_quote(backward_cypher)}::cstring,
                                  $1::agtype)
-              AS (source text, target text, edge_properties agtype)
-            """
+              AS (source text, target text, edge_properties agtype)"""
 
             pg_params = {"params": json.dumps({"pairs": pairs}, ensure_ascii=False)}
 
@@ -3849,7 +3899,8 @@ class PGGraphStorage(BaseGraphStorage):
                             f"[{self.workspace}] Failed to parse node string in batch: {node_dict}"
                         )
 
-                node_dict["id"] = node_dict["entity_id"]
+                # Add node id (entity_id) to the dictionary for easier access
+                node_dict["id"] = node_dict.get("entity_id")
                 nodes.append(node_dict)
 
         return nodes
@@ -3883,6 +3934,7 @@ class PGGraphStorage(BaseGraphStorage):
                         logger.warning(
                             f"[{self.workspace}] Failed to parse edge string in batch: {edge_agtype}"
                         )
+                        edge_agtype = {}
 
                 source_agtype = item["source"]["properties"]
                 # Process string result, parse it to JSON dictionary
@@ -4187,6 +4239,10 @@ class PGGraphStorage(BaseGraphStorage):
                     $$) AS (a AGTYPE, r AGTYPE, b AGTYPE)"""
                 results = await self._query(query)
 
+                logger.info(f"[{self.workspace}] Query results count: {len(results)}")
+                if results:
+                     logger.info(f"[{self.workspace}] First result sample: {results[0]}")
+
                 # Process query results, deduplicate nodes and edges
                 nodes_dict = {}
                 edges_dict = {}
@@ -4328,13 +4384,13 @@ class PGGraphStorage(BaseGraphStorage):
                 GROUP BY node_id
             )
             SELECT
-                (ag_catalog.agtype_access_operator(VARIADIC ARRAY[v.properties, '"entity_id"'::agtype]))::text AS label
+                (ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '"entity_id"'::agtype]))::text AS label
             FROM
                 node_degrees d
             JOIN
                 {self.graph_name}._ag_label_vertex v ON d.node_id = v.id
             WHERE
-                ag_catalog.agtype_access_operator(VARIADIC ARRAY[v.properties, '"entity_id"'::agtype]) IS NOT NULL
+                ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '"entity_id"'::agtype]) IS NOT NULL
             ORDER BY
                 d.degree DESC,
                 label ASC
@@ -4424,7 +4480,7 @@ class PGGraphStorage(BaseGraphStorage):
                 drop_query = f"""SELECT * FROM cypher('{self.graph_name}', $$
                                 MATCH (n)
                                 DETACH DELETE n
-                                $$) AS (result agtype)"""
+                                $$) AS (n agtype)"""
 
                 await self._query(drop_query, readonly=False)
                 return {
@@ -4448,6 +4504,8 @@ NAMESPACE_TABLE_MAP = {
     NameSpace.VECTOR_STORE_ENTITIES: "LIGHTRAG_VDB_ENTITY",
     NameSpace.VECTOR_STORE_RELATIONSHIPS: "LIGHTRAG_VDB_RELATION",
     NameSpace.DOC_STATUS: "LIGHTRAG_DOC_STATUS",
+    NameSpace.KV_STORE_TENANTS: "LIGHTRAG_TENANTS",
+    NameSpace.KV_STORE_KNOWLEDGE_BASES: "LIGHTRAG_KNOWLEDGE_BASES",
 }
 
 
@@ -4458,6 +4516,26 @@ def namespace_to_table_name(namespace: str) -> str:
 
 
 TABLES = {
+    "LIGHTRAG_TENANTS": {
+        "ddl": """CREATE TABLE LIGHTRAG_TENANTS (
+                    id VARCHAR(255),
+                    workspace VARCHAR(255),
+                    data JSONB,
+                    create_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
+                    update_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT LIGHTRAG_TENANTS_PK PRIMARY KEY (workspace, id)
+                    )"""
+    },
+    "LIGHTRAG_KNOWLEDGE_BASES": {
+        "ddl": """CREATE TABLE LIGHTRAG_KNOWLEDGE_BASES (
+                    id VARCHAR(255),
+                    workspace VARCHAR(255),
+                    data JSONB,
+                    create_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
+                    update_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT LIGHTRAG_KNOWLEDGE_BASES_PK PRIMARY KEY (workspace, id)
+                    )"""
+    },
     "LIGHTRAG_DOC_FULL": {
         "ddl": """CREATE TABLE LIGHTRAG_DOC_FULL (
                     id VARCHAR(255),
@@ -4638,6 +4716,10 @@ SQL_TEMPLATES = {
                                  EXTRACT(EPOCH FROM update_time)::BIGINT as update_time
                                  FROM LIGHTRAG_FULL_RELATIONS WHERE workspace=$1 AND id IN ({ids})
                                 """,
+    "get_by_id_tenants": """SELECT data FROM LIGHTRAG_TENANTS WHERE workspace=$1 AND id=$2""",
+    "get_by_id_knowledge_bases": """SELECT data FROM LIGHTRAG_KNOWLEDGE_BASES WHERE workspace=$1 AND id=$2""",
+    "get_by_ids_tenants": """SELECT data FROM LIGHTRAG_TENANTS WHERE workspace=$1 AND id IN ({ids})""",
+    "get_by_ids_knowledge_bases": """SELECT data FROM LIGHTRAG_KNOWLEDGE_BASES WHERE workspace=$1 AND id IN ({ids})""",
     "filter_keys": "SELECT id FROM {table_name} WHERE workspace=$1 AND id IN ({ids})",
     "upsert_doc_full": """INSERT INTO LIGHTRAG_DOC_FULL (id, content, workspace)
                         VALUES ($1, $2, $3)
@@ -4681,6 +4763,18 @@ SQL_TEMPLATES = {
                       ON CONFLICT (workspace,id) DO UPDATE
                       SET relation_pairs=EXCLUDED.relation_pairs,
                       count=EXCLUDED.count,
+                      update_time = EXCLUDED.update_time
+                     """,
+    "upsert_tenants": """INSERT INTO LIGHTRAG_TENANTS (workspace, id, data, create_time, update_time)
+                      VALUES ($1, $2, $3, $4, $5)
+                      ON CONFLICT (workspace,id) DO UPDATE
+                      SET data=EXCLUDED.data,
+                      update_time = EXCLUDED.update_time
+                     """,
+    "upsert_knowledge_bases": """INSERT INTO LIGHTRAG_KNOWLEDGE_BASES (workspace, id, data, create_time, update_time)
+                      VALUES ($1, $2, $3, $4, $5)
+                      ON CONFLICT (workspace,id) DO UPDATE
+                      SET data=EXCLUDED.data,
                       update_time = EXCLUDED.update_time
                      """,
     # SQL for VectorStorage

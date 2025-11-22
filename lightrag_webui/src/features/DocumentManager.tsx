@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '@/stores/settings'
+import { useTenantState } from '@/stores/tenant'
+import { useDocumentUploadContext } from '@/hooks/useTenantContext'
 import Button from '@/components/ui/Button'
 import { cn } from '@/lib/utils'
 import {
@@ -32,7 +34,7 @@ import { errorMessage } from '@/lib/utils'
 import { toast } from 'sonner'
 import { useBackendState } from '@/stores/state'
 
-import { RefreshCwIcon, ActivityIcon, ArrowUpIcon, ArrowDownIcon, RotateCcwIcon, CheckSquareIcon, XIcon, AlertTriangle, Info } from 'lucide-react'
+import { RefreshCwIcon, ActivityIcon, ArrowUpIcon, ArrowDownIcon, RotateCcwIcon, CheckSquareIcon, XIcon, AlertTriangle, Info, AlertCircle } from 'lucide-react'
 import PipelineStatusDialog from '@/components/documents/PipelineStatusDialog'
 
 type StatusFilter = DocStatus | 'all';
@@ -204,6 +206,10 @@ export default function DocumentManager() {
 
   // Legacy state for backward compatibility
   const [docs, setDocs] = useState<DocsStatusesResponse | null>(null)
+
+  // Tenant context
+  const selectedTenant = useTenantState.use.selectedTenant()
+  const selectedKB = useTenantState.use.selectedKB()
 
   const currentTab = useSettingsStore.use.currentTab()
   const showFileName = useSettingsStore.use.showFileName()
@@ -1067,6 +1073,26 @@ export default function DocumentManager() {
     sortDirection,
     fetchPaginatedDocuments
   ]);
+
+  // Guard: Check if tenant and KB are selected
+  if (!selectedTenant || !selectedKB) {
+    return (
+      <Card className="!rounded-none !overflow-hidden flex flex-col h-full min-h-0">
+        <CardHeader className="py-2 px-6">
+          <CardTitle className="text-lg">{t('documentPanel.documentManager.title')}</CardTitle>
+        </CardHeader>
+        <CardContent className="flex-1 flex flex-col min-h-0 items-center justify-center">
+          <div className="text-center">
+            <AlertCircle className="h-12 w-12 text-yellow-500 mx-auto mb-4" />
+            <h3 className="text-lg font-semibold mb-2">{t('documentPanel.selectTenant')}</h3>
+            <p className="text-sm text-gray-500">
+              {t('documentPanel.selectTenantDescription')}
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
 
   return (
     <Card className="!rounded-none !overflow-hidden flex flex-col h-full min-h-0">

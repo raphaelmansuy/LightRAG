@@ -1,8 +1,9 @@
-import axios, { AxiosError } from 'axios'
+import { AxiosError } from 'axios'
 import { backendBaseUrl, popularLabelsDefaultLimit, searchLabelsDefaultLimit } from '@/lib/constants'
 import { errorMessage } from '@/lib/utils'
 import { useSettingsStore } from '@/stores/settings'
 import { navigationService } from '@/services/navigation'
+import { axiosInstance } from './client'
 
 // Types
 export type LightragNodeType = {
@@ -254,55 +255,6 @@ export type LoginResponse = {
 
 export const InvalidApiKeyError = 'Invalid API Key'
 export const RequireApiKeError = 'API Key required'
-
-// Axios instance
-const axiosInstance = axios.create({
-  baseURL: backendBaseUrl,
-  headers: {
-    'Content-Type': 'application/json'
-  }
-})
-
-// Interceptor: add api key and check authentication
-axiosInstance.interceptors.request.use((config) => {
-  const apiKey = useSettingsStore.getState().apiKey
-  const token = localStorage.getItem('LIGHTRAG-API-TOKEN');
-
-  // Always include token if it exists, regardless of path
-  if (token) {
-    config.headers['Authorization'] = `Bearer ${token}`
-  }
-  if (apiKey) {
-    config.headers['X-API-Key'] = apiKey
-  }
-  return config
-})
-
-// Interceptor：hanle error
-axiosInstance.interceptors.response.use(
-  (response) => response,
-  (error: AxiosError) => {
-    if (error.response) {
-      if (error.response?.status === 401) {
-        // For login API, throw error directly
-        if (error.config?.url?.includes('/login')) {
-          throw error;
-        }
-        // For other APIs, navigate to login page
-        navigationService.navigateToLogin();
-
-        // return a reject Promise
-        return Promise.reject(new Error('Authentication required'));
-      }
-      throw new Error(
-        `${error.response.status} ${error.response.statusText}\n${JSON.stringify(
-          error.response.data
-        )}\n${error.config?.url}`
-      )
-    }
-    throw error
-  }
-)
 
 // API methods
 export const queryGraphs = async (

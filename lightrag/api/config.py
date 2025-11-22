@@ -350,6 +350,11 @@ def parse_args() -> argparse.Namespace:
 
     # For JWT Auth
     args.auth_accounts = get_env_value("AUTH_ACCOUNTS", "")
+    if not args.auth_accounts:
+        auth_user = get_env_value("AUTH_USER", "")
+        auth_pass = get_env_value("AUTH_PASS", "")
+        if auth_user and auth_pass:
+            args.auth_accounts = f"{auth_user}:{auth_pass}"
     args.token_secret = get_env_value("TOKEN_SECRET", "lightrag-jwt-default-secret")
     args.token_expire_hours = get_env_value("TOKEN_EXPIRE_HOURS", 48, int)
     args.guest_token_expire_hours = get_env_value("GUEST_TOKEN_EXPIRE_HOURS", 24, int)

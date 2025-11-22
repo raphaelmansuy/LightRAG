@@ -6,8 +6,10 @@ import StatusIndicator from '@/components/status/StatusIndicator'
 import { SiteInfo, webuiPrefix } from '@/lib/constants'
 import { useBackendState, useAuthStore } from '@/stores/state'
 import { useSettingsStore } from '@/stores/settings'
+import { useTenantState } from '@/stores/tenant'
 import { getAuthStatus } from '@/api/lightrag'
 import SiteHeader from '@/features/SiteHeader'
+import TenantSelectionPage from '@/features/TenantSelectionPage'
 import { InvalidApiKeyError, RequireApiKeError } from '@/api/lightrag'
 import { ZapIcon } from 'lucide-react'
 
@@ -22,6 +24,9 @@ function App() {
   const message = useBackendState.use.message()
   const enableHealthCheck = useSettingsStore.use.enableHealthCheck()
   const currentTab = useSettingsStore.use.currentTab()
+  const selectedTenant = useTenantState.use.selectedTenant()
+  const initializeTenantState = useTenantState.use.initializeFromStorage()
+  
   const [apiKeyAlertOpen, setApiKeyAlertOpen] = useState(false)
   const [initializing, setInitializing] = useState(true) // Add initializing state
   const versionCheckRef = useRef(false); // Prevent duplicate calls in Vite dev mode
@@ -40,6 +45,7 @@ function App() {
   // Set up mount/unmount status tracking
   useEffect(() => {
     isMountedRef.current = true;
+    initializeTenantState();
 
     // Handle page reload/unload
     const handleBeforeUnload = () => {
@@ -194,6 +200,8 @@ function App() {
               </div>
             </div>
           </div>
+        ) : !selectedTenant ? (
+          <TenantSelectionPage onSelect={() => {}} />
         ) : (
           // Main content after initialization
           <main className="flex h-screen w-screen overflow-hidden">

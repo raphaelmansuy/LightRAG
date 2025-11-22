@@ -159,6 +159,8 @@ async def ollama_embed(texts: list[str], embed_model, **kwargs) -> np.ndarray:
     host = kwargs.pop("host", None)
     timeout = kwargs.pop("timeout", None)
 
+    logger.info(f"Ollama embed called with host: {host}, model: {embed_model}")
+
     ollama_client = ollama.AsyncClient(host=host, timeout=timeout, headers=headers)
     try:
         options = kwargs.pop("options", {})

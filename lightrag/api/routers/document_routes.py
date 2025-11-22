@@ -25,8 +25,9 @@ from lightrag import LightRAG
 from lightrag.base import DeletionResult, DocProcessingStatus, DocStatus
 from lightrag.utils import generate_track_id
 from lightrag.api.utils_api import get_combined_auth_dependency
-from lightrag.api.dependencies import get_tenant_context_optional
+from lightrag.api.dependencies import get_tenant_context_optional, get_tenant_context
 from lightrag.models.tenant import TenantContext
+from lightrag.tenant_rag_manager import TenantRAGManager
 from ..config import global_args
 
 
@@ -1663,24 +1664,36 @@ async def background_delete_documents(
 
 
 def create_document_routes(
-    rag: LightRAG, doc_manager: DocumentManager, api_key: Optional[str] = None
+    rag: LightRAG, doc_manager: DocumentManager, api_key: Optional[str] = None, rag_manager: Optional[TenantRAGManager] = None
 ):
     # Create combined auth dependency for document routes
     combined_auth = get_combined_auth_dependency(api_key)
+    
+    async def get_tenant_rag(tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional)) -> LightRAG:
+        """Dependency to get tenant-specific RAG instance (optional)"""
+        if rag_manager and tenant_context and tenant_context.tenant_id and tenant_context.kb_id:
+            return await rag_manager.get_rag_instance(
+                tenant_context.tenant_id, 
+                tenant_context.kb_id,
+                tenant_context.user_id  # Pass user_id for security validation
+            )
+        return rag
 
     @router.post(
         "/scan", response_model=ScanResponse, dependencies=[Depends(combined_auth)]
     )
     async def scan_for_new_documents(
         background_tasks: BackgroundTasks,
-        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional)
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
     ):
         """
-        Trigger the scanning process for new documents.
+        Trigger the scanning process for new documents (tenant-scoped).
 
         This endpoint initiates a background task that scans the input directory for new documents
-        and processes them. If a scanning process is already running, it returns a status indicating
-        that fact.
+        and processes them within the selected tenant and knowledge base context.
+
+        Args:
+            tenant_rag: Tenant-specific RAG instance (injected via dependency)
 
         Returns:
             ScanResponse: A response object containing the scanning status and track_id
@@ -1688,8 +1701,8 @@ def create_document_routes(
         # Generate track_id with "scan" prefix for scanning operation
         track_id = generate_track_id("scan")
 
-        # Start the scanning process in the background with track_id
-        background_tasks.add_task(run_scanning_process, rag, doc_manager, track_id)
+        # Start the scanning process in the background with tenant-specific RAG
+        background_tasks.add_task(run_scanning_process, tenant_rag, doc_manager, track_id)
         return ScanResponse(
             status="scanning_started",
             message="Scanning process has been initiated in the background",
@@ -1702,18 +1715,19 @@ def create_document_routes(
     async def upload_to_input_dir(
         background_tasks: BackgroundTasks,
         file: UploadFile = File(...),
-        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional)
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
     ):
         """
-        Upload a file to the input directory and index it.
+        Upload a file to the input directory and index it (tenant-scoped).
 
         This API endpoint accepts a file through an HTTP POST request, checks if the
-        uploaded file is of a supported type, saves it in the specified input directory,
+        uploaded file is of a supported type, saves it in the tenant-specific input directory,
         indexes it for retrieval, and returns a success status with relevant details.
 
         Args:
             background_tasks: FastAPI BackgroundTasks for async processing
             file (UploadFile): The file to be uploaded. It must have an allowed extension.
+            tenant_rag: Tenant-specific RAG instance (injected via dependency)
 
         Returns:
             InsertResponse: A response object containing the upload status and a message.
@@ -1732,8 +1746,8 @@ def create_document_routes(
                     detail=f"Unsupported file type. Supported types: {doc_manager.supported_extensions}",
                 )
 
-            # Check if filename already exists in doc_status storage
-            existing_doc_data = await rag.doc_status.get_doc_by_file_path(safe_filename)
+            # Check if filename already exists in tenant-specific doc_status storage
+            existing_doc_data = await tenant_rag.doc_status.get_doc_by_file_path(safe_filename)
             if existing_doc_data:
                 # Get document status information for error message
                 status = existing_doc_data.get("status", "unknown")
@@ -1757,8 +1771,8 @@ def create_document_routes(
 
             track_id = generate_track_id("upload")
 
-            # Add to background tasks and get track_id
-            background_tasks.add_task(pipeline_index_file, rag, file_path, track_id)
+            # Add to background tasks with tenant-specific RAG
+            background_tasks.add_task(pipeline_index_file, tenant_rag, file_path, track_id)
 
             return InsertResponse(
                 status="success",
@@ -2557,16 +2571,18 @@ def create_document_routes(
     )
     async def get_documents_paginated(
         request: DocumentsRequest,
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
     ) -> PaginatedDocsResponse:
         """
-        Get documents with pagination support.
+        Get documents with pagination support (tenant-scoped).
 
         This endpoint retrieves documents with pagination, filtering, and sorting capabilities.
         It provides better performance for large document collections by loading only the
-        requested page of data.
+        requested page of data. Documents are scoped to the selected tenant and knowledge base.
 
         Args:
             request (DocumentsRequest): The request body containing pagination parameters
+            tenant_rag: Tenant-specific RAG instance (injected via dependency)
 
         Returns:
             PaginatedDocsResponse: A response object containing:
@@ -2578,15 +2594,15 @@ def create_document_routes(
             HTTPException: If an error occurs while retrieving documents (500).
         """
         try:
-            # Get paginated documents and status counts in parallel
-            docs_task = rag.doc_status.get_docs_paginated(
+            # Get paginated documents and status counts in parallel using tenant-specific RAG
+            docs_task = tenant_rag.doc_status.get_docs_paginated(
                 status_filter=request.status_filter,
                 page=request.page,
                 page_size=request.page_size,
                 sort_field=request.sort_field,
                 sort_direction=request.sort_direction,
             )
-            status_counts_task = rag.doc_status.get_all_status_counts()
+            status_counts_task = tenant_rag.doc_status.get_all_status_counts()
 
             # Execute both queries in parallel
             (documents_with_ids, total_count), status_counts = await asyncio.gather(
@@ -2642,12 +2658,17 @@ def create_document_routes(
         response_model=StatusCountsResponse,
         dependencies=[Depends(combined_auth)],
     )
-    async def get_document_status_counts() -> StatusCountsResponse:
+    async def get_document_status_counts(
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
+    ) -> StatusCountsResponse:
         """
-        Get counts of documents by status.
+        Get counts of documents by status (tenant-scoped).
 
         This endpoint retrieves the count of documents in each processing status
-        (PENDING, PROCESSING, PROCESSED, FAILED) for all documents in the system.
+        (PENDING, PROCESSING, PROCESSED, FAILED) for the selected tenant and knowledge base.
+
+        Args:
+            tenant_rag: Tenant-specific RAG instance (injected via dependency)
 
         Returns:
             StatusCountsResponse: A response object containing status counts
@@ -2656,7 +2677,7 @@ def create_document_routes(
             HTTPException: If an error occurs while retrieving status counts (500).
         """
         try:
-            status_counts = await rag.doc_status.get_all_status_counts()
+            status_counts = await tenant_rag.doc_status.get_all_status_counts()
             return StatusCountsResponse(status_counts=status_counts)
 
         except Exception as e:
