@@ -18,8 +18,9 @@ make init-db
 make status
 
 # 5. Access the application
-# WebUI:       http://localhost:3000
-# API Server:  http://localhost:9621
+# WebUI:       http://localhost:3001
+# API Server:  http://localhost:8000
+# API Docs:    http://localhost:8000/docs
 
 ## 🔐 Demo credentials (local/dev only)
 
@@ -45,12 +46,12 @@ Port:     5432 (internal-only; not forwarded to localhost by default)
 │                                                                 │
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │                    Web UI (React)                        │  │
-│  │              http://localhost:3000                       │  │
+│  │              http://localhost:3001                       │  │
 │  └────────────────────┬─────────────────────────────────────┘  │
-│                       │                                         │
+│                       │                                        │
 │  ┌────────────────────▼─────────────────────────────────────┐  │
 │  │         LightRAG API Server (FastAPI)                   │  │
-│  │             http://localhost:9621                       │  │
+│  │             http://localhost:8000                       │  │
 │  │                                                          │  │
 │  │  Multi-Tenant Context:  (tenant_id, kb_id)             │  │
 │  │  - Enforces data isolation at API level                │  │
@@ -199,15 +200,15 @@ DEFAULT_KB=default
 - Skip index creation after migration
 - Mix tenants in a single transaction
 
-## 📊 Service Endpoints
+## 📋 Service Endpoints
 
 | Service | URL | Purpose |
 |---------|-----|---------|
-| **WebUI** | `http://localhost:3000` | Interactive frontend for document upload, KB visualization, queries |
-| **API Server** | `http://localhost:9621` | RESTful API for programmatic access |
-| **PostgreSQL** | `internal-only (container network)` | Database backend (not exposed to host) |
+| **WebUI** | `http://localhost:3001` | Interactive frontend for document upload, KB visualization, queries |
+| **API Server** | `http://localhost:8000` | RESTful API for programmatic access |
+| **PostgreSQL** | `internal-only (container network)` | Database backend (not exposed to host by default) |
 | **Redis** | `localhost:6379` | Cache backend (internal only) |
-| **Health Check** | `http://localhost:9621/health` | API health status |
+| **Health Check** | `http://localhost:8000/health` | API health status |
 
 ## 🧪 Testing Multi-Tenant Features
 
@@ -232,7 +233,7 @@ pytest tests/test_multi_tenant_backends.py::TestDataIntegrity -v
 
 1. **Create document for tenant "acme-corp"**:
 ```bash
-curl -X POST http://localhost:9621/api/v1/insert \
+curl -X POST http://localhost:8000/api/v1/insert \
   -H "Content-Type: application/json" \
   -H "X-Tenant-Id: acme-corp" \
   -H "X-KB-Id: kb-prod" \
@@ -241,7 +242,7 @@ curl -X POST http://localhost:9621/api/v1/insert \
 
 2. **Query as "acme-corp"**:
 ```bash
-curl "http://localhost:9621/api/v1/query" \
+curl "http://localhost:8000/api/v1/query" \
   -H "X-Tenant-Id: acme-corp" \
   -H "X-KB-Id: kb-prod" \
   -G --data-urlencode "param=test"
@@ -249,7 +250,7 @@ curl "http://localhost:9621/api/v1/query" \
 
 3. **Verify isolation** - query with different tenant:
 ```bash
-curl "http://localhost:9621/api/v1/query" \
+curl "http://localhost:8000/api/v1/query" \
   -H "X-Tenant-Id: techstart" \
   -H "X-KB-Id: kb-main" \
   -G --data-urlencode "param=test"
@@ -271,14 +272,14 @@ curl "http://localhost:9621/api/v1/query" \
 - **Health Check**: Every 10 seconds
 
 ### LightRAG API
-- **Port**: 9621 (exposed)
+- **Port**: 8621 (internal), 8000 (external/host)
 - **Volume**: `./data/*` (documents, storage, tiktoken cache)
 - **Dependencies**: PostgreSQL, Redis
 - **Health Check**: Every 30 seconds
 - **Resources**: Limited to 2 CPUs / 4GB RAM
 
 ### Web UI
-- **Port**: 3000 (exposed)
+- **Port**: 3000 (internal), 3001 (external/host)
 - **Framework**: React + Vite
 - **Dependencies**: LightRAG API
 - **Health Check**: Every 30 seconds
@@ -394,7 +395,7 @@ For production deployments:
 ```python
 import requests
 
-BASE_URL = "http://localhost:9621"
+BASE_URL = "http://localhost:8000"
 
 # Headers with tenant context
 headers = {

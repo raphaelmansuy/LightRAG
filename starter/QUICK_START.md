@@ -14,8 +14,8 @@ docker compose -f docker-compose.yml -p lightrag-multitenant up -d
 docker compose -f docker-compose.yml -p lightrag-multitenant ps
 
 # Or wait a few seconds and visit:
-# Web UI: http://localhost:3000
-# API Docs: http://localhost:9621/docs
+# Web UI: http://localhost:3001
+# API Docs: http://localhost:8000/docs
 ```
 
 ### Step 3: Stop Services
@@ -27,9 +27,9 @@ docker compose -f docker-compose.yml -p lightrag-multitenant down
 
 | Service | URL | Purpose |
 |---------|-----|---------|
-| Web UI | http://localhost:9621 | User interface |
-| API Docs | http://localhost:9621/docs | Interactive API documentation |
-| API Redoc | http://localhost:9621/redoc | Alternative API docs |
+| Web UI | http://localhost:3001 | User interface |
+| API Docs | http://localhost:8000/docs | Interactive API documentation |
+| API Redoc | http://localhost:8000/redoc | Alternative API docs |
 | PostgreSQL | internal-only (container network) | Database (not exposed to host by default) |
 | Redis | localhost:6379 | Cache (internal use) |
 

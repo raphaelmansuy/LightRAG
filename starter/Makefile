@@ -48,8 +48,14 @@ help:
 	@echo "  $(YELLOW)make db-reset$(NC)           Reset database (⚠️  WARNING: deletes all data)"
 	@echo ""
 	@echo "$(YELLOW)Development & Testing:$(NC)"
-	@echo "  $(YELLOW)make test$(NC)               Run multi-tenant tests"
-	@echo "  $(YELLOW)make test-isolation$(NC)     Run tenant isolation tests"
+	@echo "  $(YELLOW)make test$(NC)               Run tests for current mode"
+	@echo "  $(YELLOW)make test-compat$(NC)        Run backward compatibility tests (MULTITENANT_MODE=off)"
+	@echo "  $(YELLOW)make test-isolation$(NC)     Run tenant isolation tests (MULTITENANT_MODE=on)"
+	@echo "  $(YELLOW)make test-multi$(NC)         Run full multi-tenant tests (MULTITENANT_MODE=demo)"
+	@echo "  $(YELLOW)make test-security$(NC)      Run security and authorization tests"
+	@echo "  $(YELLOW)make test-all-scenarios$(NC) Run all three test scenarios sequentially"
+	@echo "  $(YELLOW)make test-coverage$(NC)      Run tests with coverage report"
+	@echo "  $(YELLOW)make test-dry-run$(NC)       Show which tests would run (discovery)"
 	@echo "  $(YELLOW)make api-health$(NC)         Check API health status"
 	@echo ""
 	@echo "$(YELLOW)Debugging & Monitoring:$(NC)"
@@ -272,31 +278,91 @@ db-reset:
 api-health:
 	@echo "$(BLUE)🏥 Checking API Health...$(NC)"
 	@echo ""
-	@if curl -s http://localhost:9621/health > /dev/null 2>&1; then \
+	@if curl -s http://localhost:8000/health > /dev/null 2>&1; then \
 		echo "$(GREEN)✓ API is healthy and responding$(NC)"; \
 		echo "$(BLUE)API Response:$(NC)"; \
-		curl -s http://localhost:9621/health | jq . 2>/dev/null || curl -s http://localhost:9621/health; \
+		curl -s http://localhost:8000/health | jq . 2>/dev/null || curl -s http://localhost:8000/health; \
 	else \
 		echo "$(RED)✗ API is not responding$(NC)"; \
 		echo "$(YELLOW)Services may still be starting. Check logs with: make logs$(NC)"; \
 	fi
 	@echo ""
 
-# Run multi-tenant tests
-test:
-	@echo "$(BLUE)🧪 Running Multi-Tenant Tests...$(NC)"
-	@echo ""
-	@echo "$(YELLOW)Running pytest on multi-tenant test suite...$(NC)"
-	docker compose -f $(DOCKER_COMPOSE_FILE) -p $(PROJECT_NAME) exec -T lightrag-api pytest tests/test_multi_tenant_backends.py -v 2>/dev/null || \
-		echo "$(YELLOW)Note: Run 'make up' first to start services$(NC)"
+# ============================================================================
+# MULTI-TENANT TESTING
+# ============================================================================
 
-# Run tenant isolation tests
+# Run all tests for current mode
+test:
+	@echo "$(BLUE)🧪 Running Tests for Current Mode...$(NC)"
+	@echo ""
+	@MULTITENANT_MODE=$${MULTITENANT_MODE:-demo} && echo "$(YELLOW)Mode: $$MULTITENANT_MODE$(NC)"
+	@pytest tests/ -v --tb=short 2>/dev/null || \
+		echo "$(YELLOW)Note: Run 'make up' first to start services or run inside Docker container$(NC)"
+
+# Run backward compatibility tests (MULTITENANT_MODE=off)
+test-compat:
+	@echo "$(BLUE)🧪 Running Backward Compatibility Tests...$(NC)"
+	@echo ""
+	@echo "$(YELLOW)Note: Requires MULTITENANT_MODE=off$(NC)"
+	@MULTITENANT_MODE=off pytest tests/test_backward_compatibility.py -v --tb=short 2>/dev/null || \
+		echo "$(YELLOW)Note: Tests skipped or failed$(NC)"
+
+# Run tenant isolation tests (MULTITENANT_MODE=on)
 test-isolation:
 	@echo "$(BLUE)🔒 Running Tenant Isolation Tests...$(NC)"
 	@echo ""
-	@echo "$(YELLOW)Testing data isolation between tenants...$(NC)"
-	docker compose -f $(DOCKER_COMPOSE_FILE) -p $(PROJECT_NAME) exec -T lightrag-api pytest tests/test_multi_tenant_backends.py::TestTenantIsolation -v 2>/dev/null || \
-		echo "$(YELLOW)Note: Run 'make up' first to start services$(NC)"
+	@echo "$(YELLOW)Note: Requires MULTITENANT_MODE=on$(NC)"
+	@MULTITENANT_MODE=on pytest tests/test_multi_tenant_backends.py::TestTenantIsolation -v --tb=short 2>/dev/null || \
+		echo "$(YELLOW)Note: Tests skipped or failed$(NC)"
+
+# Run multi-tenant tests (MULTITENANT_MODE=demo)
+test-multi:
+	@echo "$(BLUE)🔒 Running Full Multi-Tenant Tests...$(NC)"
+	@echo ""
+	@echo "$(YELLOW)Note: Requires MULTITENANT_MODE=demo$(NC)"
+	@MULTITENANT_MODE=demo pytest tests/test_multi_tenant_backends.py tests/test_tenant_security.py -v --tb=short 2>/dev/null || \
+		echo "$(YELLOW)Note: Tests skipped or failed$(NC)"
+
+# Run security tests
+test-security:
+	@echo "$(BLUE)🔒 Running Security Tests...$(NC)"
+	@echo ""
+	@MULTITENANT_MODE=demo pytest tests/test_tenant_security.py -v --tb=short 2>/dev/null || \
+		echo "$(YELLOW)Note: Tests skipped or failed$(NC)"
+
+# Run all scenario tests sequentially (requires Docker)
+test-all-scenarios:
+	@echo "$(BLUE)🧪 Running All Test Scenarios...$(NC)"
+	@echo ""
+	@if [ -f "run_all_tests.sh" ]; then \
+		chmod +x run_all_tests.sh && ./run_all_tests.sh; \
+	else \
+		echo "$(RED)✗ run_all_tests.sh not found$(NC)"; \
+		exit 1; \
+	fi
+
+# Dry-run: show which tests would run
+test-dry-run:
+	@echo "$(BLUE)📋 Test Discovery (Dry Run)...$(NC)"
+	@echo ""
+	@pytest tests/ --collect-only -q 2>/dev/null || \
+		echo "$(YELLOW)Note: pytest not available$(NC)"
+
+# Run tests with coverage report
+test-coverage:
+	@echo "$(BLUE)📊 Running Tests with Coverage...$(NC)"
+	@echo ""
+	@pytest tests/ --cov=lightrag --cov-report=html --cov-report=term -v 2>/dev/null || \
+		echo "$(YELLOW)Note: Coverage tools not available$(NC)"
+
+# Monitor tests (watch mode for continuous testing)
+test-watch:
+	@echo "$(BLUE)👁️  Starting Test Watch Mode...$(NC)"
+	@echo "$(YELLOW)Tests will re-run on file changes (Ctrl+C to exit)$(NC)"
+	@echo ""
+	@pytest-watch tests/ -v 2>/dev/null || \
+		echo "$(YELLOW)Note: pytest-watch not installed$(NC)"
 
 # ============================================================================
 # CLEANUP
