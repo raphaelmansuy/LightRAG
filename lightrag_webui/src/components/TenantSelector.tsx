@@ -15,9 +15,10 @@ interface TenantSelectorProps {
   onTenantChange?: () => void
   onKBChange?: () => void
   hideTenantSelect?: boolean
+  hideKBSelect?: boolean
 }
 
-export function TenantSelector({ onTenantChange, onKBChange, hideTenantSelect = false }: TenantSelectorProps) {
+export function TenantSelector({ onTenantChange, onKBChange, hideTenantSelect = false, hideKBSelect = false }: TenantSelectorProps) {
   const selectedTenant = useTenantState.use.selectedTenant()
   const selectedKB = useTenantState.use.selectedKB()
   const tenants = useTenantState.use.tenants()
@@ -182,11 +183,13 @@ export function TenantSelector({ onTenantChange, onKBChange, hideTenantSelect = 
         </div>
       )}
 
-      {/* Divider */}
-      <div className="w-px h-12 bg-border/50" />
+      {/* Divider - only show if KB selector is visible */}
+      {!hideKBSelect && selectedTenant && (
+        <div className="w-px h-12 bg-border/50" />
+      )}
 
-      {/* Knowledge Base Selector */}
-      {selectedTenant && (
+      {/* Knowledge Base Selector - hide if hideKBSelect is true */}
+      {!hideKBSelect && selectedTenant && (
         <div className="flex flex-col gap-1">
           <label className="text-xs font-semibold text-muted-foreground">Knowledge Base</label>
           <div className="flex gap-2 items-center">
@@ -223,8 +226,8 @@ export function TenantSelector({ onTenantChange, onKBChange, hideTenantSelect = 
         </div>
       )}
 
-      {/* Selection Info */}
-      {selectedTenant && selectedKB && (
+      {/* Selection Info - only show if KB selector is visible */}
+      {!hideKBSelect && selectedTenant && selectedKB && (
         <div className="text-xs text-muted-foreground ml-2 px-2 py-1 bg-background rounded">
           {knowledgeBases.find(kb => kb.kb_id === selectedKB.kb_id)?.num_documents || 0} docs
         </div>

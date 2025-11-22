@@ -20,6 +20,20 @@ make status
 # 5. Access the application
 # WebUI:       http://localhost:3000
 # API Server:  http://localhost:9621
+
+## 🔐 Demo credentials (local/dev only)
+
+Use the following defaults when running the stack locally for demonstrations or testing. These come from `starter/env.example` — change them in `.env` for any shared or production deployments.
+
+```
+User:     lightrag
+Password: lightrag_secure_password
+Database: lightrag_multitenant
+Host:     postgres (inside Docker)
+Port:     5432 (internal-only; not forwarded to localhost by default)
+```
+
+⚠️ Note: These credentials are for development/demos only. Always pick strong, unique passwords for production and avoid committing secrets to source control.
 ```
 
 ## 📋 System Architecture
@@ -191,7 +205,7 @@ DEFAULT_KB=default
 |---------|-----|---------|
 | **WebUI** | `http://localhost:3000` | Interactive frontend for document upload, KB visualization, queries |
 | **API Server** | `http://localhost:9621` | RESTful API for programmatic access |
-| **PostgreSQL** | `localhost:5432` | Database backend (internal only) |
+| **PostgreSQL** | `internal-only (container network)` | Database backend (not exposed to host) |
 | **Redis** | `localhost:6379` | Cache backend (internal only) |
 | **Health Check** | `http://localhost:9621/health` | API health status |
 

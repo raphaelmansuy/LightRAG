@@ -14,7 +14,7 @@ docker compose -f docker-compose.yml -p lightrag-multitenant up -d
 docker compose -f docker-compose.yml -p lightrag-multitenant ps
 
 # Or wait a few seconds and visit:
-# Web UI: http://localhost:9621
+# Web UI: http://localhost:3000
 # API Docs: http://localhost:9621/docs
 ```
 
@@ -30,17 +30,19 @@ docker compose -f docker-compose.yml -p lightrag-multitenant down
 | Web UI | http://localhost:9621 | User interface |
 | API Docs | http://localhost:9621/docs | Interactive API documentation |
 | API Redoc | http://localhost:9621/redoc | Alternative API docs |
-| PostgreSQL | localhost:5432 | Database (internal use) |
+| PostgreSQL | internal-only (container network) | Database (not exposed to host by default) |
 | Redis | localhost:6379 | Cache (internal use) |
 
-## 🔐 Database Credentials
+## 🔐 Demo database credentials (local/dev only)
 
-```
-User: lightrag
+Use these defaults for local development or demos. Change `POSTGRES_PASSWORD` in `starter/.env` before running any shared/production systems.
+
+```text
+User:     lightrag
 Password: lightrag_secure_password
 Database: lightrag_multitenant
-Host: postgres (inside Docker)
-Port: 5432 (forwarded to localhost:5432)
+Host:     postgres (inside Docker)
+Port:     5432 (internal-only; not forwarded to localhost by default)
 ```
 
 ## 📊 Database Tables
@@ -128,10 +130,10 @@ docker compose -f docker-compose.yml -p lightrag-multitenant down -v
 
 ### Services Won't Start
 ```bash
-# Check if ports are already in use
-lsof -i :5432  # PostgreSQL
-lsof -i :6379  # Redis
-lsof -i :9621  # API
+# If you previously published ports to the host, check if they're in use. For the default
+# compose setup PostgreSQL is internal-only and not bound to host interfaces.
+lsof -i :6379  # Redis (if published)
+lsof -i :9621  # API (if published)
 
 # Kill processes if needed
 kill -9 <PID>

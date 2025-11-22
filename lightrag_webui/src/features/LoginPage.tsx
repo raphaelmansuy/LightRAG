@@ -209,9 +209,6 @@ const LoginPage = () => {
       <div className="absolute top-4 right-4 flex items-center gap-2">
         <AppSettings className="bg-white/30 dark:bg-gray-800/30 backdrop-blur-sm rounded-md" />
       </div>
-      <div className="absolute top-4 left-4">
-        <TenantSelector />
-      </div>
       <Card className="w-full max-w-[480px] shadow-lg mx-4">
         <CardHeader className="flex items-center justify-center space-y-2 pb-8 pt-6">
           <div className="flex flex-col items-center space-y-4">
@@ -229,6 +226,12 @@ const LoginPage = () => {
         </CardHeader>
         <CardContent className="px-8 pb-8">
           <form onSubmit={handleSubmit} className="space-y-6">
+            <div>
+              <label className="text-sm font-medium mb-2 block">
+                {t('login.tenant', 'Tenant')}
+              </label>
+              <TenantSelector hideKBSelect={true} />
+            </div>
             <div className="flex items-center gap-4">
               <label htmlFor="username-input" className="text-sm font-medium w-16 shrink-0">
                 {t('login.username')}
