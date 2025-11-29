@@ -34,10 +34,15 @@ axiosInstance.interceptors.request.use((config) => {
       const selectedTenant = JSON.parse(selectedTenantJson);
       if (selectedTenant?.tenant_id) {
         config.headers['X-Tenant-ID'] = selectedTenant.tenant_id;
+        console.log('[Axios Interceptor] Added X-Tenant-ID header:', selectedTenant.tenant_id);
+      } else {
+        console.warn('[Axios Interceptor] Tenant in localStorage has no tenant_id:', selectedTenant);
       }
     } catch (e) {
       console.error('[Axios Interceptor] Failed to parse selected tenant from localStorage:', e);
     }
+  } else {
+    console.warn('[Axios Interceptor] No SELECTED_TENANT in localStorage');
   }
 
   if (selectedKBJson) {
@@ -45,11 +50,24 @@ axiosInstance.interceptors.request.use((config) => {
       const selectedKB = JSON.parse(selectedKBJson);
       if (selectedKB?.kb_id) {
         config.headers['X-KB-ID'] = selectedKB.kb_id;
+        console.log('[Axios Interceptor] Added X-KB-ID header:', selectedKB.kb_id);
+      } else {
+        console.warn('[Axios Interceptor] KB in localStorage has no kb_id:', selectedKB);
       }
     } catch (e) {
       console.error('[Axios Interceptor] Failed to parse selected KB from localStorage:', e);
     }
+  } else {
+    console.log('[Axios Interceptor] No SELECTED_KB in localStorage (ok for some requests)');
   }
+
+  console.log('[Axios Interceptor] Request headers:', {
+    url: config.url,
+    method: config.method,
+    'X-Tenant-ID': config.headers['X-Tenant-ID'],
+    'X-KB-ID': config.headers['X-KB-ID'],
+    'Authorization': config.headers['Authorization'] ? 'EXISTS' : 'MISSING'
+  });
 
   return config
 })

@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '@/stores/settings'
 import { useTenantState } from '@/stores/tenant'
-import { useDocumentUploadContext } from '@/hooks/useTenantContext'
 import Button from '@/components/ui/Button'
 import { cn } from '@/lib/utils'
 import {
@@ -1059,9 +1058,32 @@ export default function DocumentManager() {
     setSelectedDocIds([])
   }, [pagination.page, statusFilter, sortField, sortDirection]);
 
+  // Reset document state when tenant or KB changes - clear old data immediately
+  useEffect(() => {
+    // Clear current documents to prevent showing stale data
+    setCurrentPageDocs([]);
+    setDocs(null);
+    setStatusCounts({ all: 0 });
+    setPagination(prev => ({
+      ...prev,
+      page: 1,
+      total_count: 0,
+      total_pages: 0,
+      has_next: false,
+      has_prev: false
+    }));
+    setSelectedDocIds([]);
+    // Reset page memory for all status filters
+    setPageByStatus({ all: 1, processed: 1, processing: 1, pending: 1, failed: 1 });
+    console.log('[DocumentManager] Reset document state due to tenant/KB change:', {
+      tenant_id: selectedTenant?.tenant_id,
+      kb_id: selectedKB?.kb_id
+    });
+  }, [selectedTenant?.tenant_id, selectedKB?.kb_id]);
+
   // Central effect to handle all data fetching
   useEffect(() => {
-    if (currentTab === 'documents') {
+    if (currentTab === 'documents' && selectedTenant && selectedKB) {
       fetchPaginatedDocuments(pagination.page, pagination.page_size, statusFilter);
     }
   }, [
@@ -1071,7 +1093,9 @@ export default function DocumentManager() {
     statusFilter,
     sortField,
     sortDirection,
-    fetchPaginatedDocuments
+    fetchPaginatedDocuments,
+    selectedTenant?.tenant_id, // Trigger fetch when tenant changes
+    selectedKB?.kb_id // Trigger fetch when KB changes
   ]);
 
   // Guard: Check if tenant and KB are selected

@@ -1,4 +1,3 @@
-import { AxiosError } from 'axios'
 import { backendBaseUrl, popularLabelsDefaultLimit, searchLabelsDefaultLimit } from '@/lib/constants'
 import { errorMessage } from '@/lib/utils'
 import { useSettingsStore } from '@/stores/settings'
@@ -322,15 +321,44 @@ export const queryTextStream = async (
 ) => {
   const apiKey = useSettingsStore.getState().apiKey;
   const token = localStorage.getItem('LIGHTRAG-API-TOKEN');
+  
+  // Get tenant context from localStorage
+  const selectedTenantJson = localStorage.getItem('SELECTED_TENANT');
+  const selectedKBJson = localStorage.getItem('SELECTED_KB');
+  
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
     'Accept': 'application/x-ndjson',
   };
+  
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
   if (apiKey) {
     headers['X-API-Key'] = apiKey;
+  }
+  
+  // Add tenant context headers
+  if (selectedTenantJson) {
+    try {
+      const selectedTenant = JSON.parse(selectedTenantJson);
+      if (selectedTenant?.tenant_id) {
+        headers['X-Tenant-ID'] = selectedTenant.tenant_id;
+      }
+    } catch (e) {
+      console.error('[queryTextStream] Failed to parse selected tenant:', e);
+    }
+  }
+  
+  if (selectedKBJson) {
+    try {
+      const selectedKB = JSON.parse(selectedKBJson);
+      if (selectedKB?.kb_id) {
+        headers['X-KB-ID'] = selectedKB.kb_id;
+      }
+    } catch (e) {
+      console.error('[queryTextStream] Failed to parse selected KB:', e);
+    }
   }
 
   try {

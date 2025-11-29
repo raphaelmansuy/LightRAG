@@ -48,9 +48,40 @@ interface TenantState {
   persistSelection: () => void
 }
 
+// Initialize tenant and KB from localStorage immediately
+const getInitialTenant = (): Tenant | null => {
+  try {
+    const storedTenant = localStorage.getItem('SELECTED_TENANT')
+    if (storedTenant) {
+      const tenant = JSON.parse(storedTenant)
+      console.log('[TenantStore] Initializing with tenant from localStorage:', tenant)
+      return tenant
+    }
+    console.log('[TenantStore] No stored tenant found in localStorage')
+  } catch (e) {
+    console.error('[TenantStore] Failed to parse stored tenant during initialization', e)
+  }
+  return null
+}
+
+const getInitialKB = (): KnowledgeBase | null => {
+  try {
+    const storedKB = localStorage.getItem('SELECTED_KB')
+    if (storedKB) {
+      const kb = JSON.parse(storedKB)
+      console.log('[TenantStore] Initializing with KB from localStorage:', kb)
+      return kb
+    }
+    console.log('[TenantStore] No stored KB found in localStorage')
+  } catch (e) {
+    console.error('[TenantStore] Failed to parse stored KB during initialization', e)
+  }
+  return null
+}
+
 const useTenantStateStoreBase = create<TenantState>()((set, get) => ({
-  selectedTenant: null,
-  selectedKB: null,
+  selectedTenant: getInitialTenant(),
+  selectedKB: getInitialKB(),
   tenants: [],
   knowledgeBases: [],
   loading: false,

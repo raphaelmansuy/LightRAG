@@ -6,15 +6,29 @@ This module provides dependency injection for tenant context extraction and vali
 from fastapi import Depends, HTTPException, status, Header, Request
 from typing import Optional
 import logging
+import os
 
 from lightrag.models.tenant import TenantContext
 from lightrag.api.auth import auth_handler
+from lightrag.api.config import global_args
 
 logger = logging.getLogger(__name__)
 
 
-async def resolve_default_tenant(request: Request, tenant_id: str) -> str:
-    """Resolve 'default' tenant_id to the first available tenant."""
+async def resolve_default_tenant(request: Request, tenant_id: str, user_id: str = None) -> str:
+    """Resolve 'default' tenant_id to user's first accessible tenant.
+    
+    Args:
+        request: FastAPI request object
+        tenant_id: Tenant ID (may be "default")
+        user_id: User identifier from token
+        
+    Returns:
+        Resolved tenant ID
+        
+    Raises:
+        HTTPException: If user has no accessible tenants
+    """
     if tenant_id != "default":
         return tenant_id
         
@@ -27,36 +41,68 @@ async def resolve_default_tenant(request: Request, tenant_id: str) -> str:
         rag_manager = request.app.state.rag_manager
         tenant_service = rag_manager.tenant_service
         
-        # Get first available tenant
-        # TODO: Filter by user access when implemented
-        tenants_result = await tenant_service.list_tenants(limit=1)
-        if tenants_result["items"]:
-            resolved_id = tenants_result["items"][0].tenant_id
-            logger.info(f"Resolved 'default' tenant_id to {resolved_id}")
+        # If no user_id provided, try to get first public tenant
+        if not user_id:
+            tenants_result = await tenant_service.list_tenants(limit=1)
+            if tenants_result["items"]:
+                resolved_id = tenants_result["items"][0].tenant_id
+                logger.info(f"Resolved 'default' tenant_id to {resolved_id} (no user)")
+                return resolved_id
+            return tenant_id
+        
+        # Get user's accessible tenants
+        user_tenants = await tenant_service.get_user_tenants(user_id=user_id, limit=1)
+        
+        if user_tenants["items"] and len(user_tenants["items"]) > 0:
+            resolved_id = user_tenants["items"][0].tenant_id
+            logger.info(f"Resolved 'default' tenant_id to {resolved_id} for user {user_id}")
             return resolved_id
         else:
-            logger.warning("No tenants found to resolve 'default'. Creating default tenant.")
+            # No accessible tenants - create a default one for the user
+            logger.warning(f"User {user_id} has no accessible tenants. Creating default tenant.")
             try:
                 new_tenant = await tenant_service.create_tenant(
-                    tenant_name="Default Tenant",
+                    tenant_name=f"Default Tenant for {user_id}",
                     description="Automatically created default tenant",
-                    created_by="system",
-                    metadata={"is_public": True}
+                    created_by=user_id,
+                    metadata={}
                 )
-                logger.info(f"Created default tenant: {new_tenant.tenant_id}")
+                # Add user as owner
+                await tenant_service.add_user_to_tenant(
+                    user_id=user_id,
+                    tenant_id=new_tenant.tenant_id,
+                    role="owner",
+                    created_by="system"
+                )
+                logger.info(f"Created default tenant: {new_tenant.tenant_id} for user {user_id}")
                 return new_tenant.tenant_id
             except Exception as create_error:
                 logger.error(f"Failed to create default tenant: {create_error}")
-                return tenant_id
+                from fastapi import HTTPException, status
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="User has no accessible tenants and failed to create default tenant"
+                )
             
     except Exception as e:
         logger.error(f"Error resolving default tenant: {e}")
+        raise
         
     return tenant_id
 
 
-async def resolve_default_kb(request: Request, tenant_id: str, kb_id: str) -> str:
-    """Resolve 'default' kb_id to the first available KB for the tenant."""
+async def resolve_default_kb(request: Request, tenant_id: str, kb_id: str, user_id: str = None) -> str:
+    """Resolve 'default' kb_id to first available KB for the tenant.
+    
+    Args:
+        request: FastAPI request object
+        tenant_id: Tenant ID
+        kb_id: KB ID (may be "default")
+        user_id: User identifier from token
+        
+    Returns:
+        Resolved KB ID
+    """
     if kb_id != "default":
         return kb_id
         
@@ -67,6 +113,20 @@ async def resolve_default_kb(request: Request, tenant_id: str, kb_id: str) -> st
             
         rag_manager = request.app.state.rag_manager
         tenant_service = rag_manager.tenant_service
+        
+        # Verify user has access to tenant if user_id provided
+        if user_id:
+            has_access = await tenant_service.verify_user_access(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                required_role="viewer"
+            )
+            if not has_access:
+                from fastapi import HTTPException, status
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"User {user_id} has no access to tenant {tenant_id}"
+                )
         
         # Get first available KB for tenant
         kbs_result = await tenant_service.list_knowledge_bases(tenant_id, limit=1)
@@ -81,7 +141,7 @@ async def resolve_default_kb(request: Request, tenant_id: str, kb_id: str) -> st
                     tenant_id=tenant_id,
                     kb_name="Default Knowledge Base",
                     description="Automatically created default knowledge base",
-                    created_by="system"
+                    created_by=user_id or "system"
                 )
                 logger.info(f"Created default KB: {new_kb.kb_id}")
                 return new_kb.kb_id
@@ -91,8 +151,10 @@ async def resolve_default_kb(request: Request, tenant_id: str, kb_id: str) -> st
             
     except Exception as e:
         logger.error(f"Error resolving default KB: {e}")
+        raise
         
     return kb_id
+
 
 
 async def get_tenant_context(
@@ -100,11 +162,13 @@ async def get_tenant_context(
     authorization: Optional[str] = Header(None),
     x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
     x_kb_id: Optional[str] = Header(None, alias="X-KB-ID"),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ) -> TenantContext:
     """Extract and validate tenant context from request headers.
     
     Multi-tenant requests must include:
     - Authorization header with JWT token containing tenant_id
+    - OR X-API-Key header with valid API key
     - X-Tenant-ID header (optional, if not in token)
     - X-KB-ID header (optional, if not in token)
     
@@ -113,6 +177,7 @@ async def get_tenant_context(
         authorization: Authorization header with Bearer token
         x_tenant_id: Tenant ID from custom header
         x_kb_id: Knowledge base ID from custom header
+        x_api_key: API Key from custom header
     
     Returns:
         TenantContext: Validated tenant context for the request
@@ -120,28 +185,37 @@ async def get_tenant_context(
     Raises:
         HTTPException: If tenant context cannot be extracted or validated
     """
-    if not authorization:
+    username = None
+    role_str = "viewer"
+    metadata = {}
+    
+    # Check API Key first
+    api_key = os.getenv("LIGHTRAG_API_KEY") or global_args.key
+    if api_key and x_api_key and x_api_key == api_key:
+        username = "system_admin"
+        role_str = "admin"
+    elif authorization:
+        # Extract token from "Bearer <token>" format
+        try:
+            scheme, token = authorization.split()
+            if scheme.lower() != "bearer":
+                raise ValueError("Invalid auth scheme")
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid authorization header format. Use: Bearer <token>"
+            )
+        
+        # Validate token
+        token_data = auth_handler.validate_token(token)
+        username = token_data.get("username")
+        metadata = token_data.get("metadata", {})
+        role_str = token_data.get("role", "viewer")
+    else:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing authorization header"
+            detail="Missing authorization header or API Key"
         )
-    
-    # Extract token from "Bearer <token>" format
-    try:
-        scheme, token = authorization.split()
-        if scheme.lower() != "bearer":
-            raise ValueError("Invalid auth scheme")
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authorization header format. Use: Bearer <token>"
-        )
-    
-    # Validate token
-    token_data = auth_handler.validate_token(token)
-    username = token_data.get("username")
-    metadata = token_data.get("metadata", {})
-    role_str = token_data.get("role", "viewer")
     
     # Determine tenant_id
     # Priority:
@@ -170,18 +244,22 @@ async def get_tenant_context(
         )
     
     # Resolve default tenant
-    tenant_id = await resolve_default_tenant(request, tenant_id)
+    tenant_id = await resolve_default_tenant(request, tenant_id, user_id=username)
 
     # Extract kb_id from token metadata or header
     kb_id = metadata.get("kb_id") or x_kb_id
     if not kb_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Missing kb_id in token or X-KB-ID header"
-        )
+        # If tenant_id is present, default to "default"
+        if tenant_id:
+            kb_id = "default"
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing kb_id in token or X-KB-ID header"
+            )
     
     # Resolve default kb
-    kb_id = await resolve_default_kb(request, tenant_id, kb_id)
+    kb_id = await resolve_default_kb(request, tenant_id, kb_id, user_id=username)
     
     # Create and return tenant context
     context = TenantContext(
@@ -203,6 +281,7 @@ async def get_tenant_context_optional(
     authorization: Optional[str] = Header(None),
     x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
     x_kb_id: Optional[str] = Header(None, alias="X-KB-ID"),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
 ) -> Optional[TenantContext]:
     """Extract tenant context from request headers (optional).
     
@@ -213,8 +292,14 @@ async def get_tenant_context_optional(
         TenantContext or None: Validated tenant context, or None if not provided
     """
     logger.debug(f"get_tenant_context_optional: auth={bool(authorization)}, tenant_id={x_tenant_id}, kb_id={x_kb_id}")
+    
+    # If X-Tenant-ID is explicitly provided, we must try to resolve the tenant context
+    # and propagate any errors (like missing auth or invalid KB) instead of falling back to global RAG.
+    if x_tenant_id:
+        return await get_tenant_context(request, authorization, x_tenant_id, x_kb_id, x_api_key)
+
     try:
-        return await get_tenant_context(request, authorization, x_tenant_id, x_kb_id)
+        return await get_tenant_context(request, authorization, x_tenant_id, x_kb_id, x_api_key)
     except HTTPException as e:
         logger.warning(f"Failed to extract tenant context (optional): {e.detail}")
         return None
@@ -290,7 +375,7 @@ async def get_tenant_context_no_kb(
         )
     
     # Resolve default tenant
-    tenant_id = await resolve_default_tenant(request, tenant_id)
+    tenant_id = await resolve_default_tenant(request, tenant_id, user_id=username)
     
     # Create context with placeholder kb_id for tenant-level operations
     context = TenantContext(

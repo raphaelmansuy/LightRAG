@@ -232,9 +232,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--embedding-binding",
         type=str,
-        default=get_env_value("EMBEDDING_BINDING", "ollama"),
+        default=get_env_value("EMBEDDING_BINDING", "openai"),
         choices=["lollms", "ollama", "openai", "azure_openai", "aws_bedrock", "jina"],
-        help="Embedding binding type (default: from env or ollama)",
+        help="Embedding binding type (default: from env or openai)",
     )
     parser.add_argument(
         "--rerank-binding",

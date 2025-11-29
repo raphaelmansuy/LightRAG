@@ -40,6 +40,57 @@ def validate_uuid(value: str, param_name: str = "id") -> str:
         )
 
 
+def validate_identifier(value: str, param_name: str = "id") -> str:
+    """Validate that a string is a safe identifier (UUID or slug).
+    
+    Accepts both UUID format and string slugs (alphanumeric with hyphens/underscores).
+    Used for tenant_id and kb_id which can be either UUIDs or human-readable strings.
+    
+    Args:
+        value: String to validate
+        param_name: Name of parameter (for error messages)
+        
+    Returns:
+        The validated identifier string
+        
+    Raises:
+        HTTPException: If value is empty or contains unsafe characters
+    """
+    if not value or not value.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid {param_name}: empty value"
+        )
+    
+    value = value.strip()
+    
+    # Try UUID first
+    try:
+        uuid.UUID(value)
+        return value
+    except ValueError:
+        pass  # Not a UUID, check if it's a valid slug
+    
+    # Validate as slug: alphanumeric, hyphens, underscores only
+    # This prevents path traversal (no slashes) and injection attacks
+    import re
+    if not re.match(r'^[a-zA-Z0-9_-]+$', value):
+        logger.warning(f"Invalid identifier format for {param_name}: {value}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid {param_name} format. Must be UUID or alphanumeric with hyphens/underscores only."
+        )
+    
+    # Limit length to prevent abuse
+    if len(value) > 255:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid {param_name}: too long (max 255 characters)"
+        )
+    
+    return value
+
+
 def validate_working_directory(
     base_dir: str,
     tenant_id: str,
@@ -48,15 +99,15 @@ def validate_working_directory(
     """Validate and create safe working directory for tenant/KB.
     
     This function does the following:
-    1. Validates tenant_id and kb_id are valid UUIDs
+    1. Validates tenant_id and kb_id are safe identifiers (UUID or slug)
     2. Creates the directory path safely
     3. Verifies the resolved path stays within base_dir (prevents path traversal)
     4. Returns both the path and composite workspace identifier
     
     Args:
         base_dir: Base working directory for all tenants
-        tenant_id: Tenant UUID
-        kb_id: Knowledge base UUID
+        tenant_id: Tenant identifier (UUID or slug like 'acme-corp')
+        kb_id: Knowledge base identifier (UUID or slug like 'kb-main')
         
     Returns:
         Tuple of (validated_path, composite_workspace_id)
@@ -64,9 +115,9 @@ def validate_working_directory(
     Raises:
         HTTPException: If validation fails or path traversal detected
     """
-    # Validate UUIDs first
-    tenant_id = validate_uuid(tenant_id, "tenant_id")
-    kb_id = validate_uuid(kb_id, "kb_id")
+    # Validate identifiers (accepts both UUIDs and slugs)
+    tenant_id = validate_identifier(tenant_id, "tenant_id")
+    kb_id = validate_identifier(kb_id, "kb_id")
     
     try:
         # Create and resolve paths

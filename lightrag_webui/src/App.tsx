@@ -12,6 +12,7 @@ import SiteHeader from '@/features/SiteHeader'
 import TenantSelectionPage from '@/features/TenantSelectionPage'
 import { InvalidApiKeyError, RequireApiKeError } from '@/api/lightrag'
 import { ZapIcon } from 'lucide-react'
+import { useTenantInitialization } from '@/hooks/useTenantInitialization'
 
 import GraphViewer from '@/features/GraphViewer'
 import DocumentManager from '@/features/DocumentManager'
@@ -26,6 +27,9 @@ function App() {
   const currentTab = useSettingsStore.use.currentTab()
   const selectedTenant = useTenantState.use.selectedTenant()
   const initializeTenantState = useTenantState.use.initializeFromStorage()
+  
+  // Auto-initialize tenant/KB on app load (fixes empty state on refresh)
+  useTenantInitialization()
   
   const [apiKeyAlertOpen, setApiKeyAlertOpen] = useState(false)
   const [initializing, setInitializing] = useState(true) // Add initializing state

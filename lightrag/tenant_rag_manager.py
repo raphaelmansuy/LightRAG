@@ -11,7 +11,7 @@ from lightrag import LightRAG
 from lightrag.models.tenant import TenantContext, TenantConfig, Tenant
 from lightrag.services.tenant_service import TenantService
 from lightrag.utils import logger
-from lightrag.security import validate_uuid, validate_working_directory
+from lightrag.security import validate_identifier, validate_working_directory
 import asyncio
 import os
 
@@ -82,11 +82,11 @@ class TenantRAGManager:
         Raises:
             ValueError: If the tenant does not exist or is inactive
             PermissionError: If user does not have access to the tenant
-            HTTPException: If tenant_id or kb_id are invalid UUIDs
+            HTTPException: If tenant_id or kb_id are invalid identifiers
         """
-        # SECURITY: Validate UUID format to prevent injection attacks
-        tenant_id = validate_uuid(tenant_id, "tenant_id")
-        kb_id = validate_uuid(kb_id, "kb_id")
+        # SECURITY: Validate identifier format to prevent injection attacks
+        tenant_id = validate_identifier(tenant_id, "tenant_id")
+        kb_id = validate_identifier(kb_id, "kb_id")
         
         cache_key = (tenant_id, kb_id)
         

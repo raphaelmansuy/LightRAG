@@ -29,7 +29,7 @@ export async function fetchTenantsPaginated(
     const params: Record<string, any> = { page, page_size: pageSize }
     if (search) params.search = search
     
-    const response = await apiClient.get('/tenants', { params })
+    const response = await apiClient.get('/api/v1/tenants', { params })
     return response.data
   } catch (error) {
     console.error('Failed to fetch tenants paginated:', error)
@@ -58,7 +58,7 @@ export async function fetchTenantsPaginated(
  */
 export async function fetchTenants(): Promise<Tenant[]> {
   try {
-    const response = await apiClient.get('/tenants')
+    const response = await apiClient.get('/api/v1/tenants')
     return response.data || []
   } catch (error) {
     console.error('Failed to fetch tenants:', error)
@@ -75,7 +75,7 @@ export async function fetchTenants(): Promise<Tenant[]> {
 
 export async function fetchCurrentTenant(tenantId: string): Promise<Tenant | null> {
   try {
-    const response = await apiClient.get('/tenants/me', {
+    const response = await apiClient.get('/api/v1/tenants/me', {
       headers: { 'X-Tenant-ID': tenantId }
     })
     return response.data
@@ -90,7 +90,7 @@ export async function createTenant(
   description?: string,
   metadata?: Record<string, any>
 ): Promise<Tenant> {
-  const response = await apiClient.post('/tenants', {
+  const response = await apiClient.post('/api/v1/tenants', {
     name,
     description,
     metadata,
@@ -117,7 +117,7 @@ export async function fetchKnowledgeBasesPaginated(
     const params: Record<string, any> = { page, page_size: pageSize }
     if (search) params.search = search
     
-    const response = await apiClient.get('/knowledge-bases', { 
+    const response = await apiClient.get('/api/v1/knowledge-bases', { 
       params,
       headers: { 'X-Tenant-ID': tenantId }
     })
@@ -153,7 +153,7 @@ export async function fetchKnowledgeBasesPaginated(
  */
 export async function fetchKnowledgeBases(tenantId: string): Promise<KnowledgeBase[]> {
   try {
-    const response = await apiClient.get('/knowledge-bases', {
+    const response = await apiClient.get('/api/v1/knowledge-bases', {
       headers: { 'X-Tenant-ID': tenantId }
     })
     return response.data?.items || []
@@ -179,7 +179,7 @@ export async function fetchKnowledgeBase(
   kbId: string
 ): Promise<KnowledgeBase | null> {
   try {
-    const response = await apiClient.get(`/knowledge-bases/${kbId}`, {
+    const response = await apiClient.get(`/api/v1/knowledge-bases/${kbId}`, {
       headers: { 'X-Tenant-ID': tenantId }
     })
     return response.data
@@ -196,7 +196,7 @@ export async function createKnowledgeBase(
   metadata?: Record<string, any>
 ): Promise<KnowledgeBase> {
   const response = await apiClient.post(
-    '/knowledge-bases',
+    '/api/v1/knowledge-bases',
     {
       name,
       description,
@@ -215,7 +215,7 @@ export async function updateKnowledgeBase(
   updates: Partial<KnowledgeBase>
 ): Promise<KnowledgeBase> {
   const response = await apiClient.put(
-    `/knowledge-bases/${kbId}`,
+    `/api/v1/knowledge-bases/${kbId}`,
     updates,
     {
       headers: { 'X-Tenant-ID': tenantId }
@@ -225,7 +225,7 @@ export async function updateKnowledgeBase(
 }
 
 export async function deleteKnowledgeBase(tenantId: string, kbId: string): Promise<void> {
-  await apiClient.delete(`/knowledge-bases/${kbId}`, {
+  await apiClient.delete(`/api/v1/knowledge-bases/${kbId}`, {
     headers: { 'X-Tenant-ID': tenantId }
   })
 }

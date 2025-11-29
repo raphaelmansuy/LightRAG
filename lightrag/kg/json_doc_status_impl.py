@@ -94,8 +94,21 @@ class JsonDocStatusStorage(DocStatusStorage):
         if self._storage_lock is None:
             raise StorageNotInitializedError("JsonDocStatusStorage")
         async with self._storage_lock:
-            for doc in self._data.values():
-                counts[doc["status"]] += 1
+            for doc_id, doc in self._data.items():
+                try:
+                    status = doc.get("status")
+                    if status in counts:
+                        counts[status] += 1
+                    else:
+                        # Log warning for unknown status but don't fail
+                        logger.warning(
+                            f"[{self.workspace}] Unknown status '{status}' for document {doc_id}"
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"[{self.workspace}] Error counting status for document {doc_id}: {e}"
+                    )
+                    continue
         return counts
 
     async def get_docs_by_status(
@@ -232,6 +245,9 @@ class JsonDocStatusStorage(DocStatusStorage):
         # For JSON storage, we load all data and sort/filter in memory
         all_docs = []
 
+        if self._storage_lock is None:
+            raise StorageNotInitializedError("JsonDocStatusStorage")
+
         async with self._storage_lock:
             for doc_id, doc_data in self._data.items():
                 # Apply status filter
@@ -252,7 +268,12 @@ class JsonDocStatusStorage(DocStatusStorage):
                     if "error_msg" not in data:
                         data["error_msg"] = None
 
-                    doc_status = DocProcessingStatus(**data)
+                    # Filter data to only include valid fields for DocProcessingStatus
+                    # This prevents TypeError if extra fields are present in the JSON
+                    valid_fields = DocProcessingStatus.__dataclass_fields__.keys()
+                    filtered_data = {k: v for k, v in data.items() if k in valid_fields}
+                    
+                    doc_status = DocProcessingStatus(**filtered_data)
 
                     # Add sort key for sorting
                     if sort_field == "id":
@@ -266,9 +287,14 @@ class JsonDocStatusStorage(DocStatusStorage):
 
                     all_docs.append((doc_id, doc_status))
 
-                except KeyError as e:
+                except (KeyError, TypeError, ValueError) as e:
                     logger.error(
                         f"[{self.workspace}] Error processing document {doc_id}: {e}"
+                    )
+                    continue
+                except Exception as e:
+                    logger.error(
+                        f"[{self.workspace}] Unexpected error processing document {doc_id}: {e}"
                     )
                     continue
 

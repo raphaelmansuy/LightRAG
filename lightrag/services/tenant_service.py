@@ -63,12 +63,47 @@ class TenantService:
     async def get_tenant(self, tenant_id: str) -> Optional[Tenant]:
         """Retrieve a tenant by ID.
         
+        Queries both PostgreSQL tenants table and KV storage to ensure
+        tenants created via database initialization scripts are also available.
+        
         Args:
             tenant_id: Tenant identifier
             
         Returns:
             Tenant object if found, None otherwise
         """
+        # First, try to get tenant from PostgreSQL database if available
+        if hasattr(self.kv_storage, 'db') and self.kv_storage.db is not None:
+            try:
+                logger.debug(f"Attempting to query tenant {tenant_id} from PostgreSQL database")
+                # Query the tenants table directly (use $1 for PostgreSQL parameter)
+                row = await self.kv_storage.db.query(
+                    "SELECT tenant_id, name, description, created_at, updated_at FROM tenants WHERE tenant_id = $1",
+                    [tenant_id]
+                )
+                
+                if row:
+                    # Create a Tenant object from the database row
+                    tenant = Tenant(
+                        tenant_id=row['tenant_id'],
+                        tenant_name=row['name'],
+                        description=row.get('description', ''),
+                        created_by=None,  # Not tracked in basic schema
+                        metadata={'is_public': True},  # Allow all users to access demo tenants
+                    )
+                    # Override timestamps from database
+                    if 'created_at' in row:
+                        tenant.created_at = row['created_at']
+                    if 'updated_at' in row:
+                        tenant.updated_at = row['updated_at']
+                    
+                    logger.debug(f"Retrieved tenant {tenant_id} from PostgreSQL database")
+                    return tenant
+            except Exception as e:
+                logger.debug(f"Could not query tenant from PostgreSQL database: {e}")
+                # Fall through to KV storage
+        
+        # Try KV storage as fallback
         data = await self.kv_storage.get_by_id(
             f"{self.tenant_namespace}:{tenant_id}"
         )
@@ -79,22 +114,22 @@ class TenantService:
     async def verify_user_access(
         self,
         user_id: str,
-        tenant_id: str
+        tenant_id: str,
+        required_role: str = "viewer"
     ) -> bool:
-        """Verify that a user has access to a specific tenant.
+        """Verify that a user has required role for a specific tenant.
         
         This is a CRITICAL security function that prevents unauthorized
-        cross-tenant data access. Currently implements a basic check that
-        allows admin users and tenant creators to access tenants.
-        
-        TODO: Implement proper user-tenant membership table and roles.
+        cross-tenant data access. Checks user-tenant membership table
+        with role-based access control.
         
         Args:
             user_id: User identifier from JWT token
             tenant_id: Requested tenant ID
+            required_role: Minimum required role (viewer, editor, admin, owner)
             
         Returns:
-            True if user has access, False otherwise
+            True if user has access with required role, False otherwise
         """
         if not user_id or not tenant_id:
             logger.warning("verify_user_access called with empty user_id or tenant_id")
@@ -106,13 +141,30 @@ class TenantService:
             logger.debug(f"Access granted: admin user {user_id} has access to all tenants")
             return True
         
-        # Get tenant to check creator
+        # Check membership table using PostgreSQL function
+        if self.kv_storage.db:
+            try:
+                result = await self.kv_storage.db.query(
+                    "SELECT has_tenant_access($1, $2, $3) as has_access",
+                    [user_id, tenant_id, required_role]
+                )
+                if result and len(result) > 0:
+                    has_access = result[0].get('has_access', False)
+                    if has_access:
+                        logger.debug(f"Access granted: user {user_id} has {required_role}+ role for tenant {tenant_id}")
+                        return True
+                    else:
+                        logger.warning(f"Access denied: user {user_id} lacks {required_role} role for tenant {tenant_id}")
+                        return False
+            except Exception as e:
+                logger.error(f"Error checking user access: {e}")
+                # Fall through to legacy check
+        
+        # Legacy fallback: Check if tenant is public or user is creator
         tenant = await self.get_tenant(tenant_id)
         if not tenant:
             logger.debug(f"Tenant {tenant_id} not found during access check")
             return False
-            
-        logger.info(f"Checking access for user={user_id} to tenant={tenant_id}. Metadata={tenant.metadata}")
         
         # Check if tenant is public
         if tenant.metadata.get("is_public", False):
@@ -124,12 +176,310 @@ class TenantService:
             logger.debug(f"Access granted: user {user_id} is creator of tenant {tenant_id}")
             return True
         
-        # TODO: Check user-tenant membership table
-        # For now, only creator has access
         logger.warning(
-            f"Access denied: user {user_id} is not creator of tenant {tenant_id}"
+            f"Access denied: user {user_id} has no access to tenant {tenant_id}"
         )
         return False
+    
+    async def add_user_to_tenant(
+        self,
+        user_id: str,
+        tenant_id: str,
+        role: str,
+        created_by: str
+    ) -> dict:
+        """Add a user to a tenant with specified role.
+        
+        Args:
+            user_id: User identifier to add
+            tenant_id: Tenant identifier
+            role: User role (owner, admin, editor, viewer)
+            created_by: User who is adding this member
+            
+        Returns:
+            Dictionary with membership information
+            
+        Raises:
+            ValueError: If tenant doesn't exist or role is invalid
+        """
+        # Validate role
+        valid_roles = ['owner', 'admin', 'editor', 'viewer']
+        if role not in valid_roles:
+            raise ValueError(f"Invalid role: {role}. Must be one of {valid_roles}")
+        
+        # Verify tenant exists
+        tenant = await self.get_tenant(tenant_id)
+        if not tenant:
+            raise ValueError(f"Tenant {tenant_id} not found")
+        
+        if not self.kv_storage.db:
+            raise RuntimeError("PostgreSQL database required for membership management")
+        
+        try:
+            # Insert membership
+            result = await self.kv_storage.db.query(
+                """
+                INSERT INTO user_tenant_memberships (user_id, tenant_id, role, created_by)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id, tenant_id) 
+                DO UPDATE SET role = $3, updated_at = NOW()
+                RETURNING id, user_id, tenant_id, role, created_at, created_by, updated_at
+                """,
+                [user_id, tenant_id, role, created_by]
+            )
+            
+            if result and len(result) > 0:
+                membership = result[0]
+                logger.info(f"Added user {user_id} to tenant {tenant_id} with role {role}")
+                return {
+                    "id": str(membership['id']),
+                    "user_id": str(membership['user_id']),
+                    "tenant_id": str(membership['tenant_id']),
+                    "role": str(membership['role']),
+                    "created_at": membership['created_at'].isoformat() if hasattr(membership['created_at'], 'isoformat') else str(membership['created_at']),
+                    "created_by": str(membership['created_by']),
+                    "updated_at": membership['updated_at'].isoformat() if hasattr(membership['updated_at'], 'isoformat') else str(membership['updated_at'])
+                }
+            else:
+                raise RuntimeError("Failed to add user to tenant")
+                
+        except Exception as e:
+            logger.error(f"Error adding user to tenant: {e}")
+            raise
+    
+    async def remove_user_from_tenant(
+        self,
+        user_id: str,
+        tenant_id: str
+    ) -> bool:
+        """Remove a user from a tenant.
+        
+        Args:
+            user_id: User identifier to remove
+            tenant_id: Tenant identifier
+            
+        Returns:
+            True if removed, False if membership didn't exist
+        """
+        if not self.kv_storage.db:
+            raise RuntimeError("PostgreSQL database required for membership management")
+        
+        try:
+            result = await self.kv_storage.db.query(
+                """
+                DELETE FROM user_tenant_memberships
+                WHERE user_id = $1 AND tenant_id = $2
+                RETURNING id
+                """,
+                [user_id, tenant_id]
+            )
+            
+            if result and len(result) > 0:
+                logger.info(f"Removed user {user_id} from tenant {tenant_id}")
+                return True
+            else:
+                logger.debug(f"No membership found for user {user_id} in tenant {tenant_id}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error removing user from tenant: {e}")
+            raise
+    
+    async def update_user_role(
+        self,
+        user_id: str,
+        tenant_id: str,
+        new_role: str
+    ) -> dict:
+        """Update a user's role in a tenant.
+        
+        Args:
+            user_id: User identifier
+            tenant_id: Tenant identifier
+            new_role: New role to assign
+            
+        Returns:
+            Updated membership information
+            
+        Raises:
+            ValueError: If role is invalid or membership doesn't exist
+        """
+        # Validate role
+        valid_roles = ['owner', 'admin', 'editor', 'viewer']
+        if new_role not in valid_roles:
+            raise ValueError(f"Invalid role: {new_role}. Must be one of {valid_roles}")
+        
+        if not self.kv_storage.db:
+            raise RuntimeError("PostgreSQL database required for membership management")
+        
+        try:
+            result = await self.kv_storage.db.query(
+                """
+                UPDATE user_tenant_memberships
+                SET role = $1, updated_at = NOW()
+                WHERE user_id = $2 AND tenant_id = $3
+                RETURNING id, user_id, tenant_id, role, created_at, created_by, updated_at
+                """,
+                [new_role, user_id, tenant_id]
+            )
+            
+            if result and len(result) > 0:
+                membership = result[0]
+                logger.info(f"Updated role for user {user_id} in tenant {tenant_id} to {new_role}")
+                return {
+                    "id": str(membership['id']),
+                    "user_id": str(membership['user_id']),
+                    "tenant_id": str(membership['tenant_id']),
+                    "role": str(membership['role']),
+                    "created_at": membership['created_at'].isoformat() if hasattr(membership['created_at'], 'isoformat') else str(membership['created_at']),
+                    "created_by": str(membership['created_by']),
+                    "updated_at": membership['updated_at'].isoformat() if hasattr(membership['updated_at'], 'isoformat') else str(membership['updated_at'])
+                }
+            else:
+                raise ValueError(f"No membership found for user {user_id} in tenant {tenant_id}")
+                
+        except Exception as e:
+            logger.error(f"Error updating user role: {e}")
+            raise
+    
+    async def get_user_tenants(
+        self,
+        user_id: str,
+        skip: int = 0,
+        limit: int = 100
+    ) -> dict:
+        """Get all tenants a user has access to.
+        
+        Args:
+            user_id: User identifier
+            skip: Number of records to skip
+            limit: Maximum number of records to return
+            
+        Returns:
+            Dictionary with items and total count
+        """
+        if not self.kv_storage.db:
+            # Fallback: return all public tenants
+            all_tenants = await self.list_tenants(skip=skip, limit=limit)
+            public_tenants = [
+                t for t in all_tenants["items"] 
+                if t.metadata.get("is_public", False)
+            ]
+            return {
+                "items": public_tenants,
+                "total": len(public_tenants),
+                "skip": skip,
+                "limit": limit
+            }
+        
+        try:
+            # Get tenants with user's membership
+            result = await self.kv_storage.db.query(
+                """
+                SELECT t.*, m.role, m.created_at as member_since
+                FROM tenants t
+                INNER JOIN user_tenant_memberships m ON t.tenant_id = m.tenant_id
+                WHERE m.user_id = $1
+                ORDER BY t.created_at DESC
+                LIMIT $2 OFFSET $3
+                """,
+                [user_id, limit, skip]
+            )
+            
+            # Get total count
+            count_result = await self.kv_storage.db.query(
+                """
+                SELECT COUNT(*) as total
+                FROM user_tenant_memberships
+                WHERE user_id = $1
+                """,
+                [user_id]
+            )
+            
+            total = count_result[0]['total'] if count_result else 0
+            
+            tenants = []
+            for row in result:
+                tenant_dict = dict(row)
+                tenant_dict['user_role'] = tenant_dict.pop('role', None)
+                tenant_dict['member_since'] = tenant_dict.pop('member_since', None)
+                tenants.append(self._deserialize_tenant(tenant_dict))
+            
+            return {
+                "items": tenants,
+                "total": total,
+                "skip": skip,
+                "limit": limit
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting user tenants: {e}")
+            raise
+    
+    async def get_tenant_members(
+        self,
+        tenant_id: str,
+        skip: int = 0,
+        limit: int = 100
+    ) -> dict:
+        """Get all members of a tenant.
+        
+        Args:
+            tenant_id: Tenant identifier
+            skip: Number of records to skip
+            limit: Maximum number of records to return
+            
+        Returns:
+            Dictionary with items and total count
+        """
+        if not self.kv_storage.db:
+            raise RuntimeError("PostgreSQL database required for membership management")
+        
+        try:
+            result = await self.kv_storage.db.query(
+                """
+                SELECT user_id, role, created_at, created_by, updated_at
+                FROM user_tenant_memberships
+                WHERE tenant_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2 OFFSET $3
+                """,
+                [tenant_id, limit, skip]
+            )
+            
+            # Get total count
+            count_result = await self.kv_storage.db.query(
+                """
+                SELECT COUNT(*) as total
+                FROM user_tenant_memberships
+                WHERE tenant_id = $1
+                """,
+                [tenant_id]
+            )
+            
+            total = count_result[0]['total'] if count_result else 0
+            
+            members = []
+            for row in result:
+                members.append({
+                    "user_id": str(row['user_id']),
+                    "role": str(row['role']),
+                    "created_at": row['created_at'].isoformat() if hasattr(row['created_at'], 'isoformat') else str(row['created_at']),
+                    "created_by": str(row['created_by']),
+                    "updated_at": row['updated_at'].isoformat() if row['updated_at'] and hasattr(row['updated_at'], 'isoformat') else (str(row['updated_at']) if row['updated_at'] else None)
+                })
+            
+            return {
+                "items": members,
+                "total": total,
+                "skip": skip,
+                "limit": limit
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting tenant members: {e}")
+            raise
+
     
     async def update_tenant(
         self,
@@ -174,6 +524,9 @@ class TenantService:
     ) -> Dict[str, Any]:
         """List all tenants with pagination.
         
+        Queries both KV storage and PostgreSQL database to ensure tenants
+        created via database initialization scripts are also available.
+        
         Args:
             skip: Number of tenants to skip (for pagination)
             limit: Maximum number of tenants to return
@@ -184,55 +537,96 @@ class TenantService:
             Dict with 'items' (list of tenants) and 'total' (count) keys
         """
         try:
-            # Get all tenant keys from storage
-            tenant_keys = []
-            if hasattr(self.kv_storage, 'get_by_prefix'):
-                # For storages that support prefix search
-                tenant_keys = await self.kv_storage.get_by_prefix(self.tenant_namespace)
-            elif hasattr(self.kv_storage, 'get_all'):
-                # For storages like JsonKVStorage that have get_all
-                all_data = await self.kv_storage.get_all()
-                tenant_keys = [key for key in all_data.keys() if key.startswith(f"{self.tenant_namespace}:")]
-            else:
-                # Fallback: attempt to retrieve all tenants (backend dependent)
-                logger.warning("Storage backend doesn't support prefix search, returning limited results")
-                return {"items": [], "total": 0}
-            
-            # Filter and deserialize tenants
             all_tenants = []
-            for key in tenant_keys:
-                if not key.startswith(f"{self.tenant_namespace}:"):
-                    continue
+            
+            # First, try to get tenants from PostgreSQL database if available
+            if hasattr(self.kv_storage, 'db') and self.kv_storage.db is not None:
                 try:
-                    data = await self.kv_storage.get_by_id(key)
-                    if data:
-                        tenant = self._deserialize_tenant(data)
-                        
-                        # Skip invalid tenants
-                        if not tenant.tenant_id:
-                            logger.warning(f"Skipping tenant with empty ID from key {key}")
-                            continue
-
-                        # Apply filters
-                        if tenant_id_filter and tenant.tenant_id != tenant_id_filter:
-                            continue
-                        if search:
-                            search_lower = search.lower()
-                            if not (search_lower in tenant.tenant_name.lower() or 
-                                    search_lower in (tenant.description or "").lower()):
+                    logger.debug("Attempting to query tenants from PostgreSQL database")
+                    # Query the tenants table directly
+                    rows = await self.kv_storage.db.query(
+                        "SELECT tenant_id, name, description, created_at, updated_at FROM tenants ORDER BY created_at DESC",
+                        multirows=True
+                    )
+                    
+                    if rows:
+                        for row in rows:
+                            try:
+                                # Create a Tenant object from the database row
+                                tenant = Tenant(
+                                    tenant_id=row['tenant_id'],
+                                    tenant_name=row['name'],
+                                    description=row.get('description', ''),
+                                    created_by=None,  # Not tracked in basic schema
+                                    metadata={},
+                                )
+                                # Override timestamps from database
+                                if 'created_at' in row:
+                                    tenant.created_at = row['created_at']
+                                if 'updated_at' in row:
+                                    tenant.updated_at = row['updated_at']
+                                
+                                all_tenants.append(tenant)
+                            except Exception as e:
+                                logger.error(f"Error processing tenant row: {e}")
                                 continue
-                        
-                        all_tenants.append(tenant)
+                    
+                    logger.info(f"Retrieved {len(all_tenants)} tenants from PostgreSQL database")
                 except Exception as e:
-                    logger.error(f"Error deserializing tenant from key {key}: {e}")
+                    logger.debug(f"Could not query tenants from PostgreSQL database: {e}")
+                    # Fall through to KV storage
+            
+            # If no tenants from database, try KV storage
+            if not all_tenants:
+                logger.debug("Querying tenants from KV storage")
+                tenant_keys = []
+                if hasattr(self.kv_storage, 'get_by_prefix'):
+                    # For storages that support prefix search
+                    tenant_keys = await self.kv_storage.get_by_prefix(self.tenant_namespace)
+                elif hasattr(self.kv_storage, 'get_all'):
+                    # For storages like JsonKVStorage that have get_all
+                    all_data = await self.kv_storage.get_all()
+                    tenant_keys = [key for key in all_data.keys() if key.startswith(f"{self.tenant_namespace}:")]
+                
+                # Filter and deserialize tenants from KV storage
+                for key in tenant_keys:
+                    if not key.startswith(f"{self.tenant_namespace}:"):
+                        continue
+                    try:
+                        data = await self.kv_storage.get_by_id(key)
+                        if data:
+                            tenant = self._deserialize_tenant(data)
+                            
+                            # Skip invalid tenants
+                            if not tenant.tenant_id:
+                                logger.warning(f"Skipping tenant with empty ID from key {key}")
+                                continue
+                            
+                            all_tenants.append(tenant)
+                    except Exception as e:
+                        logger.error(f"Error deserializing tenant from key {key}: {e}")
+                        continue
+            
+            # Apply filters
+            filtered_tenants = []
+            for tenant in all_tenants:
+                # Apply tenant ID filter
+                if tenant_id_filter and tenant.tenant_id != tenant_id_filter:
                     continue
+                # Apply search filter
+                if search:
+                    search_lower = search.lower()
+                    if not (search_lower in tenant.tenant_name.lower() or 
+                            search_lower in (tenant.description or "").lower()):
+                        continue
+                filtered_tenants.append(tenant)
             
             # Sort by created_at descending
-            all_tenants.sort(key=lambda t: t.created_at, reverse=True)
+            filtered_tenants.sort(key=lambda t: t.created_at, reverse=True)
             
             # Apply pagination
-            total = len(all_tenants)
-            paginated_tenants = all_tenants[skip:skip + limit]
+            total = len(filtered_tenants)
+            paginated_tenants = filtered_tenants[skip:skip + limit]
             
             logger.info(f"Listed {len(paginated_tenants)} tenants out of {total} (skip={skip}, limit={limit})")
             return {
@@ -385,6 +779,9 @@ class TenantService:
     ) -> Dict[str, Any]:
         """List all knowledge bases for a tenant with pagination.
         
+        Queries both KV storage and PostgreSQL database to ensure KBs
+        created via database initialization scripts are also available.
+        
         Args:
             tenant_id: Parent tenant ID
             skip: Number of KBs to skip (for pagination)
@@ -395,49 +792,95 @@ class TenantService:
             Dict with 'items' (list of KBs) and 'total' (count) keys
         """
         try:
-            # Get all KB keys for this tenant
-            kb_keys = []
-            if hasattr(self.kv_storage, 'get_by_prefix'):
-                # For storages that support prefix search
-                tenant_prefix = f"{self.kb_namespace}:{tenant_id}:"
-                kb_keys = await self.kv_storage.get_by_prefix(tenant_prefix)
-            elif hasattr(self.kv_storage, 'get_all'):
-                # For storages like JsonKVStorage that have get_all
-                all_data = await self.kv_storage.get_all()
-                kb_keys = [key for key in all_data.keys() if key.startswith(f"{self.kb_namespace}:{tenant_id}:")]
-            else:
-                # Fallback: return empty list
-                logger.warning("Storage backend doesn't support prefix search for KBs")
-                return {"items": [], "total": 0}
-            
-            # Filter and deserialize KBs
             all_kbs = []
-            for key in kb_keys:
-                if not key.startswith(f"{self.kb_namespace}:{tenant_id}:"):
-                    continue
-                try:
-                    data = await self.kv_storage.get_by_id(key)
-                    if data:
-                        kb = self._deserialize_kb(data)
+            
+            # First, try to get KBs from PostgreSQL database if available
+            db_queried = False
+            if hasattr(self.kv_storage, 'db'):
+                logger.info(f"PGKVStorage.db exists, attempting to query KBs for tenant {tenant_id}")
+                if self.kv_storage.db is not None:
+                    try:
+                        logger.info(f"Querying knowledge bases from PostgreSQL for tenant {tenant_id}")
+                        # Query the knowledge_bases table directly
+                        rows = await self.kv_storage.db.query(
+                            "SELECT kb_id, tenant_id, name, description, created_at, updated_at FROM knowledge_bases WHERE tenant_id = $1 ORDER BY created_at DESC",
+                            params=[tenant_id],
+                            multirows=True
+                        )
                         
-                        # Apply search filter
-                        if search:
-                            search_lower = search.lower()
-                            if not (search_lower in kb.kb_name.lower() or 
-                                    search_lower in (kb.description or "").lower()):
-                                continue
+                        if rows:
+                            for row in rows:
+                                try:
+                                    # Create a KnowledgeBase object from the database row
+                                    kb = KnowledgeBase(
+                                        kb_id=row['kb_id'],
+                                        tenant_id=row['tenant_id'],
+                                        kb_name=row['name'],
+                                        description=row.get('description', ''),
+                                    )
+                                    # Override timestamps from database
+                                    if 'created_at' in row:
+                                        kb.created_at = row['created_at']
+                                    if 'updated_at' in row:
+                                        kb.updated_at = row['updated_at']
+                                    
+                                    all_kbs.append(kb)
+                                except Exception as e:
+                                    logger.error(f"Error processing KB row: {e}")
+                                    continue
                         
-                        all_kbs.append(kb)
-                except Exception as e:
-                    logger.error(f"Error deserializing KB from key {key}: {e}")
-                    continue
+                        logger.info(f"Retrieved {len(all_kbs)} knowledge bases from PostgreSQL for tenant {tenant_id}")
+                        db_queried = True
+                    except Exception as e:
+                        logger.warning(f"Could not query knowledge bases from PostgreSQL: {e}")
+                        # Fall through to KV storage
+                else:
+                    logger.debug(f"PGKVStorage.db is None for tenant {tenant_id}")
+            else:
+                logger.debug(f"Storage doesn't have 'db' attribute (type: {type(self.kv_storage).__name__})")
+            
+            # If no KBs from database, try KV storage
+            if not all_kbs and not db_queried:
+                logger.info(f"Querying knowledge bases from KV storage for tenant {tenant_id}")
+                kb_keys = []
+                if hasattr(self.kv_storage, 'get_by_prefix'):
+                    # For storages that support prefix search
+                    tenant_prefix = f"{self.kb_namespace}:{tenant_id}:"
+                    kb_keys = await self.kv_storage.get_by_prefix(tenant_prefix)
+                elif hasattr(self.kv_storage, 'get_all'):
+                    # For storages like JsonKVStorage that have get_all
+                    all_data = await self.kv_storage.get_all()
+                    kb_keys = [key for key in all_data.keys() if key.startswith(f"{self.kb_namespace}:{tenant_id}:")]
+                
+                # Filter and deserialize KBs from KV storage
+                for key in kb_keys:
+                    if not key.startswith(f"{self.kb_namespace}:{tenant_id}:"):
+                        continue
+                    try:
+                        data = await self.kv_storage.get_by_id(key)
+                        if data:
+                            kb = self._deserialize_kb(data)
+                            all_kbs.append(kb)
+                    except Exception as e:
+                        logger.error(f"Error deserializing KB from key {key}: {e}")
+                        continue
+            
+            # Apply search filter
+            filtered_kbs = []
+            for kb in all_kbs:
+                if search:
+                    search_lower = search.lower()
+                    if not (search_lower in kb.kb_name.lower() or 
+                            search_lower in (kb.description or "").lower()):
+                        continue
+                filtered_kbs.append(kb)
             
             # Sort by created_at descending
-            all_kbs.sort(key=lambda k: k.created_at, reverse=True)
+            filtered_kbs.sort(key=lambda k: k.created_at, reverse=True)
             
             # Apply pagination
-            total = len(all_kbs)
-            paginated_kbs = all_kbs[skip:skip + limit]
+            total = len(filtered_kbs)
+            paginated_kbs = filtered_kbs[skip:skip + limit]
             
             logger.info(f"Listed {len(paginated_kbs)} KBs out of {total} for tenant {tenant_id} (skip={skip}, limit={limit})")
             return {

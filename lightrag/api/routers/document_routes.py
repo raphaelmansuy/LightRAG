@@ -1385,10 +1385,10 @@ async def pipeline_index_texts(
 async def run_scanning_process(
     rag: LightRAG, doc_manager: DocumentManager, track_id: str = None
 ):
-    """Background task to scan and index documents
+    """Background task to scan and index documents (tenant-scoped)
 
     Args:
-        rag: LightRAG instance
+        rag: Tenant-specific LightRAG instance
         doc_manager: DocumentManager instance
         track_id: Optional tracking ID to pass to all scanned files
     """
@@ -1679,12 +1679,24 @@ def create_document_routes(
             )
         return rag
 
+    async def get_tenant_doc_manager(tenant_rag: LightRAG = Depends(get_tenant_rag)) -> DocumentManager:
+        """Dependency to get tenant-specific DocumentManager"""
+        # If we are using the global rag instance (no tenant context or single tenant), use the global doc_manager
+        if tenant_rag is rag:
+            return doc_manager
+            
+        # Otherwise, create a tenant-specific document manager
+        # We use the tenant's working directory + "inputs" to ensure isolation
+        input_dir = Path(tenant_rag.working_dir) / "inputs"
+        return DocumentManager(str(input_dir))
+
     @router.post(
         "/scan", response_model=ScanResponse, dependencies=[Depends(combined_auth)]
     )
     async def scan_for_new_documents(
         background_tasks: BackgroundTasks,
         tenant_rag: LightRAG = Depends(get_tenant_rag),
+        tenant_doc_manager: DocumentManager = Depends(get_tenant_doc_manager),
     ):
         """
         Trigger the scanning process for new documents (tenant-scoped).
@@ -1694,6 +1706,7 @@ def create_document_routes(
 
         Args:
             tenant_rag: Tenant-specific RAG instance (injected via dependency)
+            tenant_doc_manager: Tenant-specific DocumentManager (injected via dependency)
 
         Returns:
             ScanResponse: A response object containing the scanning status and track_id
@@ -1701,8 +1714,8 @@ def create_document_routes(
         # Generate track_id with "scan" prefix for scanning operation
         track_id = generate_track_id("scan")
 
-        # Start the scanning process in the background with tenant-specific RAG
-        background_tasks.add_task(run_scanning_process, tenant_rag, doc_manager, track_id)
+        # Start the scanning process in the background with tenant-specific RAG and DocManager
+        background_tasks.add_task(run_scanning_process, tenant_rag, tenant_doc_manager, track_id)
         return ScanResponse(
             status="scanning_started",
             message="Scanning process has been initiated in the background",
@@ -1716,6 +1729,7 @@ def create_document_routes(
         background_tasks: BackgroundTasks,
         file: UploadFile = File(...),
         tenant_rag: LightRAG = Depends(get_tenant_rag),
+        tenant_doc_manager: DocumentManager = Depends(get_tenant_doc_manager),
     ):
         """
         Upload a file to the input directory and index it (tenant-scoped).
@@ -1728,6 +1742,7 @@ def create_document_routes(
             background_tasks: FastAPI BackgroundTasks for async processing
             file (UploadFile): The file to be uploaded. It must have an allowed extension.
             tenant_rag: Tenant-specific RAG instance (injected via dependency)
+            tenant_doc_manager: Tenant-specific DocumentManager (injected via dependency)
 
         Returns:
             InsertResponse: A response object containing the upload status and a message.
@@ -1738,12 +1753,12 @@ def create_document_routes(
         """
         try:
             # Sanitize filename to prevent Path Traversal attacks
-            safe_filename = sanitize_filename(file.filename, doc_manager.input_dir)
+            safe_filename = sanitize_filename(file.filename, tenant_doc_manager.input_dir)
 
-            if not doc_manager.is_supported_file(safe_filename):
+            if not tenant_doc_manager.is_supported_file(safe_filename):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Unsupported file type. Supported types: {doc_manager.supported_extensions}",
+                    detail=f"Unsupported file type. Supported types: {tenant_doc_manager.supported_extensions}",
                 )
 
             # Check if filename already exists in tenant-specific doc_status storage
@@ -1757,7 +1772,7 @@ def create_document_routes(
                     track_id="",
                 )
 
-            file_path = doc_manager.input_dir / safe_filename
+            file_path = tenant_doc_manager.input_dir / safe_filename
             # Check if file already exists in file system
             if file_path.exists():
                 return InsertResponse(
@@ -1789,17 +1804,18 @@ def create_document_routes(
         "/text", response_model=InsertResponse, dependencies=[Depends(combined_auth)]
     )
     async def insert_text(
-        request: InsertTextRequest, background_tasks: BackgroundTasks
+        request: InsertTextRequest, background_tasks: BackgroundTasks, tenant_rag: LightRAG = Depends(get_tenant_rag)
     ):
         """
-        Insert text into the RAG system.
+        Insert text into the RAG system (tenant-scoped).
 
         This endpoint allows you to insert text data into the RAG system for later retrieval
-        and use in generating responses.
+        and use in generating responses within the selected tenant and knowledge base.
 
         Args:
             request (InsertTextRequest): The request body containing the text to be inserted.
             background_tasks: FastAPI BackgroundTasks for async processing
+            tenant_rag: Tenant-specific RAG instance (injected via dependency)
 
         Returns:
             InsertResponse: A response object containing the status of the operation.
@@ -1814,7 +1830,7 @@ def create_document_routes(
                 and request.file_source.strip()
                 and request.file_source != "unknown_source"
             ):
-                existing_doc_data = await rag.doc_status.get_doc_by_file_path(
+                existing_doc_data = await tenant_rag.doc_status.get_doc_by_file_path(
                     request.file_source
                 )
                 if existing_doc_data:
@@ -1831,7 +1847,7 @@ def create_document_routes(
 
             background_tasks.add_task(
                 pipeline_index_texts,
-                rag,
+                tenant_rag,
                 [request.text],
                 file_sources=[request.file_source],
                 track_id=track_id,
@@ -1853,17 +1869,18 @@ def create_document_routes(
         dependencies=[Depends(combined_auth)],
     )
     async def insert_texts(
-        request: InsertTextsRequest, background_tasks: BackgroundTasks
+        request: InsertTextsRequest, background_tasks: BackgroundTasks, tenant_rag: LightRAG = Depends(get_tenant_rag)
     ):
         """
-        Insert multiple texts into the RAG system.
+        Insert multiple texts into the RAG system (tenant-scoped).
 
         This endpoint allows you to insert multiple text entries into the RAG system
-        in a single request.
+        in a single request within the selected tenant and knowledge base.
 
         Args:
             request (InsertTextsRequest): The request body containing the list of texts.
             background_tasks: FastAPI BackgroundTasks for async processing
+            tenant_rag: Tenant-specific RAG instance (injected via dependency)
 
         Returns:
             InsertResponse: A response object containing the status of the operation.
@@ -1880,7 +1897,7 @@ def create_document_routes(
                         and file_source.strip()
                         and file_source != "unknown_source"
                     ):
-                        existing_doc_data = await rag.doc_status.get_doc_by_file_path(
+                        existing_doc_data = await tenant_rag.doc_status.get_doc_by_file_path(
                             file_source
                         )
                         if existing_doc_data:
@@ -1897,7 +1914,7 @@ def create_document_routes(
 
             background_tasks.add_task(
                 pipeline_index_texts,
-                rag,
+                tenant_rag,
                 request.texts,
                 file_sources=request.file_sources,
                 track_id=track_id,
@@ -1916,7 +1933,10 @@ def create_document_routes(
     @router.delete(
         "", response_model=ClearDocumentsResponse, dependencies=[Depends(combined_auth)]
     )
-    async def clear_documents():
+    async def clear_documents(
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
+        tenant_doc_manager: DocumentManager = Depends(get_tenant_doc_manager),
+    ):
         """
         Clear all documents from the RAG system.
 
@@ -1976,15 +1996,15 @@ def create_document_routes(
             # Use drop method to clear all data
             drop_tasks = []
             storages = [
-                rag.text_chunks,
-                rag.full_docs,
-                rag.full_entities,
-                rag.full_relations,
-                rag.entities_vdb,
-                rag.relationships_vdb,
-                rag.chunks_vdb,
-                rag.chunk_entity_relation_graph,
-                rag.doc_status,
+                tenant_rag.text_chunks,
+                tenant_rag.full_docs,
+                tenant_rag.full_entities,
+                tenant_rag.full_relations,
+                tenant_rag.entities_vdb,
+                tenant_rag.relationships_vdb,
+                tenant_rag.chunks_vdb,
+                tenant_rag.chunk_entity_relation_graph,
+                tenant_rag.doc_status,
             ]
 
             # Log storage drop start
@@ -2049,7 +2069,7 @@ def create_document_routes(
             deleted_files_count = 0
             file_errors_count = 0
 
-            for file_path in doc_manager.input_dir.glob("*"):
+            for file_path in tenant_doc_manager.input_dir.glob("*"):
                 if file_path.is_file():
                     try:
                         file_path.unlink()
@@ -2198,14 +2218,17 @@ def create_document_routes(
     @router.get(
         "", response_model=DocsStatusesResponse, dependencies=[Depends(combined_auth)]
     )
-    async def documents() -> DocsStatusesResponse:
+    async def documents(tenant_rag: LightRAG = Depends(get_tenant_rag)) -> DocsStatusesResponse:
         """
-        Get the status of all documents in the system. This endpoint is deprecated; use /documents/paginated instead.
+        Get the status of all documents in the system (tenant-scoped). This endpoint is deprecated; use /documents/paginated instead.
         To prevent excessive resource consumption, a maximum of 1,000 records is returned.
 
-        This endpoint retrieves the current status of all documents, grouped by their
-        processing status (PENDING, PROCESSING, PROCESSED, FAILED). The results are
-        limited to 1000 total documents with fair distribution across all statuses.
+        This endpoint retrieves the current status of all documents within the selected tenant
+        and knowledge base, grouped by their processing status (PENDING, PROCESSING, PROCESSED, FAILED). 
+        The results are limited to 1000 total documents with fair distribution across all statuses.
+
+        Args:
+            tenant_rag: Tenant-specific RAG instance (injected via dependency)
 
         Returns:
             DocsStatusesResponse: A response object containing a dictionary where keys are
@@ -2224,7 +2247,7 @@ def create_document_routes(
                 DocStatus.FAILED,
             )
 
-            tasks = [rag.get_docs_by_status(status) for status in statuses]
+            tasks = [tenant_rag.get_docs_by_status(status) for status in statuses]
             results: List[Dict[str, DocProcessingStatus]] = await asyncio.gather(*tasks)
 
             response = DocsStatusesResponse()
@@ -2313,6 +2336,8 @@ def create_document_routes(
     async def delete_document(
         delete_request: DeleteDocRequest,
         background_tasks: BackgroundTasks,
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
+        tenant_doc_manager: DocumentManager = Depends(get_tenant_doc_manager),
     ) -> DeleteDocByIdResponse:
         """
         Delete documents and all their associated data by their IDs using background processing.
@@ -2327,6 +2352,8 @@ def create_document_routes(
         Args:
             delete_request (DeleteDocRequest): The request containing the document IDs and delete_file options.
             background_tasks: FastAPI BackgroundTasks for async processing
+            tenant_rag: Tenant-specific RAG instance (injected via dependency)
+            tenant_doc_manager: Tenant-specific DocumentManager (injected via dependency)
 
         Returns:
             DeleteDocByIdResponse: The result of the deletion operation.
@@ -2342,7 +2369,7 @@ def create_document_routes(
 
         # The rag object is initialized from the server startup args,
         # so we can access its properties here.
-        if not rag.enable_llm_cache_for_entity_extract:
+        if not tenant_rag.enable_llm_cache_for_entity_extract:
             return DeleteDocByIdResponse(
                 status="not_allowed",
                 message="Operation not allowed when LLM cache for entity extraction is disabled.",
@@ -2365,8 +2392,8 @@ def create_document_routes(
             # Add deletion task to background tasks
             background_tasks.add_task(
                 background_delete_documents,
-                rag,
-                doc_manager,
+                tenant_rag,
+                tenant_doc_manager,
                 doc_ids,
                 delete_request.delete_file,
             )
@@ -2388,15 +2415,16 @@ def create_document_routes(
         response_model=ClearCacheResponse,
         dependencies=[Depends(combined_auth)],
     )
-    async def clear_cache(request: ClearCacheRequest):
+    async def clear_cache(request: ClearCacheRequest, tenant_rag: LightRAG = Depends(get_tenant_rag)):
         """
-        Clear all cache data from the LLM response cache storage.
+        Clear all cache data from the LLM response cache storage (tenant-scoped).
 
-        This endpoint clears all cached LLM responses regardless of mode.
+        This endpoint clears all cached LLM responses regardless of mode for the selected tenant.
         The request body is accepted for API compatibility but is ignored.
 
         Args:
             request (ClearCacheRequest): The request body (ignored for compatibility).
+            tenant_rag: Tenant-specific RAG instance (injected via dependency)
 
         Returns:
             ClearCacheResponse: A response object containing the status and message.
@@ -2406,7 +2434,7 @@ def create_document_routes(
         """
         try:
             # Call the aclear_cache method (no modes parameter)
-            await rag.aclear_cache()
+            await tenant_rag.aclear_cache()
 
             # Prepare success message
             message = "Successfully cleared all cache"
@@ -2422,12 +2450,13 @@ def create_document_routes(
         response_model=DeletionResult,
         dependencies=[Depends(combined_auth)],
     )
-    async def delete_entity(request: DeleteEntityRequest):
+    async def delete_entity(request: DeleteEntityRequest, tenant_rag: LightRAG = Depends(get_tenant_rag)):
         """
-        Delete an entity and all its relationships from the knowledge graph.
+        Delete an entity and all its relationships from the knowledge graph (tenant-scoped).
 
         Args:
             request (DeleteEntityRequest): The request body containing the entity name.
+            tenant_rag: Tenant-specific RAG instance (injected via dependency)
 
         Returns:
             DeletionResult: An object containing the outcome of the deletion process.
@@ -2436,7 +2465,7 @@ def create_document_routes(
             HTTPException: If the entity is not found (404) or an error occurs (500).
         """
         try:
-            result = await rag.adelete_by_entity(entity_name=request.entity_name)
+            result = await tenant_rag.adelete_by_entity(entity_name=request.entity_name)
             if result.status == "not_found":
                 raise HTTPException(status_code=404, detail=result.message)
             if result.status == "fail":
@@ -2457,12 +2486,13 @@ def create_document_routes(
         response_model=DeletionResult,
         dependencies=[Depends(combined_auth)],
     )
-    async def delete_relation(request: DeleteRelationRequest):
+    async def delete_relation(request: DeleteRelationRequest, tenant_rag: LightRAG = Depends(get_tenant_rag)):
         """
-        Delete a relationship between two entities from the knowledge graph.
+        Delete a relationship between two entities from the knowledge graph (tenant-scoped).
 
         Args:
             request (DeleteRelationRequest): The request body containing the source and target entity names.
+            tenant_rag: Tenant-specific RAG instance (injected via dependency)
 
         Returns:
             DeletionResult: An object containing the outcome of the deletion process.
@@ -2471,7 +2501,7 @@ def create_document_routes(
             HTTPException: If the relation is not found (404) or an error occurs (500).
         """
         try:
-            result = await rag.adelete_by_relation(
+            result = await tenant_rag.adelete_by_relation(
                 source_entity=request.source_entity,
                 target_entity=request.target_entity,
             )
@@ -2495,15 +2525,17 @@ def create_document_routes(
         response_model=TrackStatusResponse,
         dependencies=[Depends(combined_auth)],
     )
-    async def get_track_status(track_id: str) -> TrackStatusResponse:
+    async def get_track_status(track_id: str, tenant_rag: LightRAG = Depends(get_tenant_rag)) -> TrackStatusResponse:
         """
-        Get the processing status of documents by tracking ID.
+        Get the processing status of documents by tracking ID (tenant-scoped).
 
         This endpoint retrieves all documents associated with a specific tracking ID,
-        allowing users to monitor the processing progress of their uploaded files or inserted texts.
+        allowing users to monitor the processing progress of their uploaded files or inserted texts
+        within the selected tenant and knowledge base.
 
         Args:
             track_id (str): The tracking ID returned from upload, text, or texts endpoints
+            tenant_rag: Tenant-specific RAG instance (injected via dependency)
 
         Returns:
             TrackStatusResponse: A response object containing:
@@ -2522,7 +2554,7 @@ def create_document_routes(
             track_id = track_id.strip()
 
             # Get documents by track_id
-            docs_by_track_id = await rag.aget_docs_by_track_id(track_id)
+            docs_by_track_id = await tenant_rag.aget_docs_by_track_id(track_id)
 
             # Convert to response format
             documents = []

@@ -178,6 +178,11 @@ def create_app(args):
         "jina",
     ]:
         raise Exception("embedding binding not supported")
+    
+    # Log the configured embeddings binding for debugging
+    logger.info(f"Configured embedding binding: {args.embedding_binding}")
+    logger.info(f"Configured embedding model: {args.embedding_model}")
+    logger.info(f"Configured embedding host: {args.embedding_binding_host}")
 
     # Set default hosts if not provided
     if args.llm_binding_host is None:
@@ -665,6 +670,11 @@ def create_app(args):
     app.state.rag_manager = rag_manager
     app.include_router(create_tenant_routes(tenant_service))
     app.include_router(create_admin_routes(tenant_service))
+    
+    # Add membership management routes
+    from lightrag.api.routers import membership_routes
+    app.include_router(membership_routes.router)
+    
     app.include_router(
         create_document_routes(
             rag,
@@ -673,11 +683,11 @@ def create_app(args):
             rag_manager,
         )
     )
-    app.include_router(create_query_routes(rag, api_key, args.top_k))
+    app.include_router(create_query_routes(rag, api_key, args.top_k, rag_manager))
     app.include_router(create_graph_routes(rag, api_key, rag_manager))
 
-    # Add Ollama API routes
-    ollama_api = OllamaAPI(rag, top_k=args.top_k, api_key=api_key)
+    # Add Ollama API routes with tenant-scoped RAG support
+    ollama_api = OllamaAPI(rag, top_k=args.top_k, api_key=api_key, rag_manager=rag_manager)
     app.include_router(ollama_api.router, prefix="/api")
 
     @app.get("/")

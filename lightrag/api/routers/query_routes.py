@@ -7,10 +7,12 @@ import logging
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from lightrag import LightRAG
 from lightrag.base import QueryParam
 from lightrag.api.utils_api import get_combined_auth_dependency
 from lightrag.api.dependencies import get_tenant_context_optional
 from lightrag.models.tenant import TenantContext
+from lightrag.tenant_rag_manager import TenantRAGManager
 from pydantic import BaseModel, Field, field_validator
 
 from ascii_colors import trace_exception
@@ -166,8 +168,18 @@ class StreamChunkResponse(BaseModel):
     )
 
 
-def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
+def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag_manager: Optional[TenantRAGManager] = None):
     combined_auth = get_combined_auth_dependency(api_key)
+    
+    async def get_tenant_rag(tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional)) -> LightRAG:
+        """Dependency to get tenant-specific RAG instance for query operations"""
+        if rag_manager and tenant_context and tenant_context.tenant_id and tenant_context.kb_id:
+            return await rag_manager.get_rag_instance(
+                tenant_context.tenant_id, 
+                tenant_context.kb_id,
+                tenant_context.user_id  # Pass user_id for security validation
+            )
+        return rag
 
     @router.post(
         "/query",
@@ -271,7 +283,8 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
     )
     async def query_text(
         request: QueryRequest,
-        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional)
+        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional),
+        tenant_rag: LightRAG = Depends(get_tenant_rag)
     ):
         """
         Comprehensive RAG query endpoint with non-streaming response. Parameter "stream" is ignored.
@@ -349,7 +362,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             param.stream = False
 
             # Unified approach: always use aquery_llm for both cases
-            result = await rag.aquery_llm(request.query, param=param)
+            result = await tenant_rag.aquery_llm(request.query, param=param)
 
             # Extract LLM response and references from unified result
             llm_response = result.get("llm_response", {})
@@ -445,7 +458,8 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
     )
     async def query_text_stream(
         request: QueryRequest,
-        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional)
+        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional),
+        tenant_rag: LightRAG = Depends(get_tenant_rag)
     ):
         """
         Advanced RAG query endpoint with flexible streaming response.
@@ -571,7 +585,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             from fastapi.responses import StreamingResponse
 
             # Unified approach: always use aquery_llm for all cases
-            result = await rag.aquery_llm(request.query, param=param)
+            result = await tenant_rag.aquery_llm(request.query, param=param)
 
             async def stream_generator():
                 # Extract references and LLM response from unified result
@@ -917,7 +931,8 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
     )
     async def query_data(
         request: QueryRequest,
-        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional)
+        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional),
+        tenant_rag: LightRAG = Depends(get_tenant_rag)
     ):
         """
         Advanced data retrieval endpoint for structured RAG analysis.
@@ -1013,7 +1028,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
         """
         try:
             param = request.to_query_params(False)  # No streaming for data endpoint
-            response = await rag.aquery_data(request.query, param=param)
+            response = await tenant_rag.aquery_data(request.query, param=param)
 
             # aquery_data returns the new format with status, message, data, and metadata
             if isinstance(response, dict):

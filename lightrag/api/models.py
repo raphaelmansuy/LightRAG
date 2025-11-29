@@ -5,6 +5,7 @@ API request and response models for multi-tenant LightRAG.
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
+from enum import Enum
 
 
 # Tenant Management Models
@@ -70,6 +71,54 @@ class KBResponse(BaseModel):
 class PaginatedKBResponse(BaseModel):
     """Paginated response for knowledge bases."""
     items: List[KBResponse]
+    total: int
+    skip: int
+    limit: int
+
+
+# Membership Management Models
+
+class UserRole(str, Enum):
+    """User roles for tenant access control."""
+    OWNER = "owner"
+    ADMIN = "admin"
+    EDITOR = "editor"
+    VIEWER = "viewer"
+
+
+class TenantMembership(BaseModel):
+    """Tenant membership information."""
+    id: str
+    user_id: str
+    tenant_id: str
+    role: UserRole
+    created_at: str
+    created_by: str
+    updated_at: str
+
+
+class AddMemberRequest(BaseModel):
+    """Request to add a user to a tenant."""
+    user_id: str = Field(..., min_length=1, max_length=255)
+    role: UserRole = UserRole.VIEWER
+
+
+class UpdateMemberRoleRequest(BaseModel):
+    """Request to update a member's role."""
+    role: UserRole
+
+
+class MemberResponse(BaseModel):
+    """Response model for tenant member."""
+    user_id: str
+    role: UserRole
+    created_at: str
+    created_by: str
+
+
+class PaginatedMembersResponse(BaseModel):
+    """Paginated response for tenant members."""
+    items: List[MemberResponse]
     total: int
     skip: int
     limit: int

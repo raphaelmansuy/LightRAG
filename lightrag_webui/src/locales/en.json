@@ -165,7 +165,9 @@
       "errors": {
         "fetchFailed": "Failed to get pipeline status\n{{error}}"
       }
-    }
+    },
+    "selectTenant": "Please Select a Tenant and Knowledge Base",
+    "selectTenantDescription": "Choose a tenant and knowledge base from the dropdowns above to view and manage documents."
   },
   "graphPanel": {
     "dataIsTruncated": "Graph data is truncated to Max Nodes",

@@ -139,7 +139,23 @@ up:
 		echo "$(YELLOW)Run 'make setup' first to create it.$(NC)"; \
 		exit 1; \
 	fi
+	@echo "$(YELLOW)→ Cleaning up any existing containers from previous runs...$(NC)"
+	@docker ps -a --filter "name=lightrag" --format "{{.Names}}" | xargs -r docker rm -f > /dev/null 2>&1 || true
+	@echo ""
 	@echo "$(YELLOW)→ Starting services with Docker Compose...$(NC)"
+	@echo ""
+	@MULTITENANT_MODE=$$(grep -E '^MULTITENANT_MODE=' $(ENV_FILE) | cut -d '=' -f2 || echo "demo"); \
+	echo "$(BLUE)📊 Testing Mode: $(YELLOW)$$MULTITENANT_MODE$(NC)"; \
+	if [ "$$MULTITENANT_MODE" = "demo" ]; then \
+		echo "$(GREEN)   ✓ Multi-Tenant Demo Mode (2 tenants)$(NC)"; \
+		echo "     • Tenant 1: acme-corp (kb-prod, kb-dev)"; \
+		echo "     • Tenant 2: techstart (kb-main, kb-backup)"; \
+	elif [ "$$MULTITENANT_MODE" = "on" ]; then \
+		echo "$(GREEN)   ✓ Multi-Tenant Mode (Single default tenant)$(NC)"; \
+	elif [ "$$MULTITENANT_MODE" = "off" ]; then \
+		echo "$(GREEN)   ✓ Compatibility Mode (Single-tenant, like main branch)$(NC)"; \
+	fi
+	@echo ""
 	docker compose -f $(DOCKER_COMPOSE_FILE) -p $(PROJECT_NAME) up -d
 	@echo "$(GREEN)✓ Services started!$(NC)"
 	@echo ""
@@ -164,6 +180,8 @@ up:
 down:
 	@echo "$(BLUE)🛑 Stopping LightRAG Multi-Tenant Stack...$(NC)"
 	docker compose -f $(DOCKER_COMPOSE_FILE) -p $(PROJECT_NAME) down
+	@echo "$(YELLOW)→ Cleaning up any orphaned containers...$(NC)"
+	@docker ps -a --filter "name=lightrag" --format "{{.Names}}" | xargs -r docker rm -f > /dev/null 2>&1 || true
 	@echo "$(GREEN)✓ Services stopped$(NC)"
 	@echo ""
 
@@ -225,9 +243,18 @@ init-db:
 	@echo ""
 	@echo "$(GREEN)✓ Database initialized with multi-tenant schema!$(NC)"
 	@echo ""
-	@echo "$(BLUE)Sample Tenants Created:$(NC)"
-	@echo "  • acme-corp (kb-prod, kb-dev)"
-	@echo "  • techstart (kb-main, kb-backup)"
+	@echo "$(BLUE)📦 Pre-configured Demo Tenants:$(NC)"
+	@echo "  ★ Tenant: acme-corp"
+	@echo "    - kb-prod  (Production KB)"
+	@echo "    - kb-dev   (Development KB)"
+	@echo ""
+	@echo "  ★ Tenant: techstart"
+	@echo "    - kb-main   (Main KB)"
+	@echo "    - kb-backup (Backup KB)"
+	@echo ""
+	@echo "$(YELLOW)💡 Tips:$(NC)"
+	@echo "  • Use X-Tenant-ID and X-KB-ID headers in API requests"
+	@echo "  • Example: curl -H 'X-Tenant-ID: acme-corp' -H 'X-KB-ID: kb-prod' ..."
 	@echo ""
 
 # Connect to PostgreSQL shell
@@ -235,6 +262,14 @@ db-shell:
 	@echo "$(BLUE)🖥️  Connecting to PostgreSQL shell...$(NC)"
 	@echo "$(YELLOW)Type \\q to exit$(NC)"
 	docker compose -f $(DOCKER_COMPOSE_FILE) -p $(PROJECT_NAME) exec postgres psql -U lightrag -d lightrag_multitenant
+	@echo ""
+
+# Check database status and list tenants
+db-check:
+	@echo "$(BLUE)🔍 Checking database status...$(NC)"
+	@docker compose -f $(DOCKER_COMPOSE_FILE) -p $(PROJECT_NAME) exec -T postgres psql -U lightrag -d lightrag_multitenant -c "SELECT count(*) as tenant_count FROM tenants;"
+	@docker compose -f $(DOCKER_COMPOSE_FILE) -p $(PROJECT_NAME) exec -T postgres psql -U lightrag -d lightrag_multitenant -c "SELECT tenant_id, name FROM tenants LIMIT 5;"
+	@echo "$(GREEN)✓ Database check complete$(NC)"
 	@echo ""
 
 # Backup database
@@ -263,6 +298,9 @@ db-reset:
 	@read -p "Are you sure? Type 'yes' to confirm: " confirm; \
 	if [ "$$confirm" = "yes" ]; then \
 		echo "$(YELLOW)Resetting database...$(NC)"; \
+		echo "$(YELLOW)→ Terminating existing connections...$(NC)"; \
+		docker compose -f $(DOCKER_COMPOSE_FILE) -p $(PROJECT_NAME) exec -T postgres psql -U lightrag -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'lightrag_multitenant' AND pid <> pg_backend_pid();" 2>/dev/null || true; \
+		echo "$(YELLOW)→ Dropping database...$(NC)"; \
 		docker compose -f $(DOCKER_COMPOSE_FILE) -p $(PROJECT_NAME) exec -T postgres psql -U lightrag -d postgres -c "DROP DATABASE IF EXISTS lightrag_multitenant;"; \
 		make init-db; \
 	else \

@@ -9,7 +9,7 @@ import {
   SelectValue,
 } from '@/components/ui/Select'
 import Button from '@/components/ui/Button'
-import { PlusIcon, Building2, ArrowRightLeft } from 'lucide-react'
+import { PlusIcon, Building2, ArrowRightLeft, Loader2, AlertCircle, CheckCircle2 } from 'lucide-react'
 
 interface TenantSelectorProps {
   onTenantChange?: () => void
@@ -32,36 +32,21 @@ export function TenantSelector({ onTenantChange, onKBChange, hideTenantSelect = 
   const setKnowledgeBases = useTenantState.use.setKnowledgeBases()
   const setLoading = useTenantState.use.setLoading()
   const setError = useTenantState.use.setError()
-  const initializeFromStorage = useTenantState.use.initializeFromStorage()
   const clearTenantSelection = useTenantState.use.clearTenantSelection()
 
-  // Pagination settings
   const tenantPageSize = 5
   const kbPageSize = 5
 
-  // Initialize from storage on mount
-  useEffect(() => {
-    initializeFromStorage()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // Load tenants on mount with pagination
   useEffect(() => {
     const loadTenants = async () => {
       setLoading(true)
       try {
-        console.log('TenantSelector: Loading tenants...')
         const data = await fetchTenantsPaginated(1, tenantPageSize)
-        console.log('TenantSelector: Loaded tenants:', data)
         setTenants(data.items)
-
-        // If no tenant selected but we have tenants, auto-select first one
         if (!selectedTenant && data.items.length > 0) {
-          console.log('TenantSelector: Auto-selecting first tenant:', data.items[0])
           setSelectedTenant(data.items[0])
         }
       } catch (err) {
-        console.error('TenantSelector: Error loading tenants:', err)
         setError(err instanceof Error ? err.message : 'Failed to load tenants')
       } finally {
         setLoading(false)
@@ -72,8 +57,9 @@ export function TenantSelector({ onTenantChange, onKBChange, hideTenantSelect = 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Load knowledge bases when tenant changes with pagination
   useEffect(() => {
+    if (hideKBSelect) return
+
     if (!selectedTenant) {
       setKnowledgeBases([])
       setSelectedKB(null)
@@ -83,22 +69,14 @@ export function TenantSelector({ onTenantChange, onKBChange, hideTenantSelect = 
     const loadKBs = async () => {
       setLoading(true)
       try {
-        console.log('TenantSelector: Loading KBs for tenant:', selectedTenant.tenant_id)
         const data = await fetchKnowledgeBasesPaginated(selectedTenant.tenant_id, 1, kbPageSize)
-        console.log('TenantSelector: Loaded KBs:', data)
         setKnowledgeBases(data.items)
-
-        // If no KB selected but we have KBs, auto-select first one
         if (!selectedKB && data.items.length > 0) {
-          console.log('TenantSelector: Auto-selecting first KB:', data.items[0])
           setSelectedKB(data.items[0])
         } else if (selectedKB && !data.items.find(kb => kb.kb_id === selectedKB.kb_id)) {
-          // Clear KB if it no longer exists
-          console.log('TenantSelector: KB no longer exists, clearing selection')
           setSelectedKB(null)
         }
       } catch (err) {
-        console.error('TenantSelector: Error loading KBs:', err)
         setError(err instanceof Error ? err.message : 'Failed to load knowledge bases')
       } finally {
         setLoading(false)
@@ -108,25 +86,33 @@ export function TenantSelector({ onTenantChange, onKBChange, hideTenantSelect = 
     loadKBs()
     onTenantChange?.()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTenant?.tenant_id])
+  }, [selectedTenant?.tenant_id, hideKBSelect])
 
-  // Notify KB change
   useEffect(() => {
     onKBChange?.()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedKB?.kb_id])
 
-  if (loading && tenants.length === 0) {
-    return <div className="text-sm text-muted-foreground">Loading tenants...</div>
+  if (error && tenants.length === 0) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-2 bg-destructive/10 rounded-lg border border-destructive/20">
+        <AlertCircle className="h-4 w-4 text-destructive" />
+        <span className="text-sm text-destructive">{error}</span>
+      </div>
+    )
   }
 
-  if (error && tenants.length === 0) {
-    return <div className="text-sm text-destructive">{error}</div>
+  if (loading && tenants.length === 0) {
+    return (
+      <div className="flex items-center gap-2 px-3 py-2 bg-muted/50 rounded-lg">
+        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+        <span className="text-sm text-muted-foreground">Initializing tenants...</span>
+      </div>
+    )
   }
 
   return (
-    <div className="flex items-center gap-3 px-3 py-2 bg-muted/50 rounded-lg">
-      {/* Tenant Selector */}
+    <div className="flex items-center gap-3 px-3 py-2 bg-muted/50 rounded-lg border border-border/50">
       {!hideTenantSelect ? (
         <div className="flex flex-col gap-1">
           <label className="text-xs font-semibold text-muted-foreground">Tenant</label>
@@ -145,7 +131,10 @@ export function TenantSelector({ onTenantChange, onKBChange, hideTenantSelect = 
               <SelectContent>
                 {tenants.map(tenant => (
                   <SelectItem key={tenant.tenant_id} value={tenant.tenant_id}>
-                    {tenant.name || tenant.tenant_name || tenant.tenant_id}
+                    <div className="flex items-center gap-2">
+                      <Building2 className="h-3 w-3 text-muted-foreground" />
+                      {tenant.name || tenant.tenant_name || tenant.tenant_id}
+                    </div>
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -166,29 +155,31 @@ export function TenantSelector({ onTenantChange, onKBChange, hideTenantSelect = 
         <div className="flex flex-col gap-1">
           <label className="text-xs font-semibold text-muted-foreground">Tenant</label>
           <div className="flex gap-2 items-center h-8">
-             <Building2 className="h-4 w-4 text-muted-foreground" />
-             <span className="text-sm font-medium truncate max-w-[120px]" title={selectedTenant?.tenant_name}>
-                {selectedTenant?.tenant_name || 'No Tenant'}
-             </span>
-             <Button 
-                size="sm"
-                variant="ghost" 
-                className="h-6 w-6 ml-1 p-0" 
-                onClick={() => clearTenantSelection()}
-                title="Switch Tenant"
-             >
-                <ArrowRightLeft className="h-3 w-3" />
-             </Button>
+            {loading ? (
+              <Loader2 className="h-4 w-4 text-muted-foreground animate-spin" />
+            ) : (
+              <CheckCircle2 className="h-4 w-4 text-green-500" />
+            )}
+            <span className="text-sm font-medium truncate max-w-[120px]" title={selectedTenant?.name || selectedTenant?.tenant_name}>
+              {selectedTenant?.name || selectedTenant?.tenant_name || 'No Tenant'}
+            </span>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-6 w-6 ml-1 p-0 hover:bg-muted"
+              onClick={() => clearTenantSelection()}
+              title="Switch Tenant"
+            >
+              <ArrowRightLeft className="h-3 w-3" />
+            </Button>
           </div>
         </div>
       )}
 
-      {/* Divider - only show if KB selector is visible */}
       {!hideKBSelect && selectedTenant && (
         <div className="w-px h-12 bg-border/50" />
       )}
 
-      {/* Knowledge Base Selector - hide if hideKBSelect is true */}
       {!hideKBSelect && selectedTenant && (
         <div className="flex flex-col gap-1">
           <label className="text-xs font-semibold text-muted-foreground">Knowledge Base</label>
@@ -207,7 +198,10 @@ export function TenantSelector({ onTenantChange, onKBChange, hideTenantSelect = 
               <SelectContent>
                 {knowledgeBases.map(kb => (
                   <SelectItem key={kb.kb_id} value={kb.kb_id}>
-                    {kb.name || kb.kb_name || kb.kb_id}
+                    <div className="flex items-center gap-2">
+                      <div className="h-3 w-3 rounded-full bg-blue-500" />
+                      {kb.name || kb.kb_name || kb.kb_id}
+                    </div>
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -226,10 +220,21 @@ export function TenantSelector({ onTenantChange, onKBChange, hideTenantSelect = 
         </div>
       )}
 
-      {/* Selection Info - only show if KB selector is visible */}
       {!hideKBSelect && selectedTenant && selectedKB && (
-        <div className="text-xs text-muted-foreground ml-2 px-2 py-1 bg-background rounded">
-          {knowledgeBases.find(kb => kb.kb_id === selectedKB.kb_id)?.num_documents || 0} docs
+        <div className="flex items-center gap-2 ml-2 px-2 py-1 bg-background rounded border border-border/50">
+          <span className="text-xs text-muted-foreground font-medium">
+            {loading ? (
+              <div className="flex items-center gap-1">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Loading...
+              </div>
+            ) : (
+              <div className="flex items-center gap-1">
+                <CheckCircle2 className="h-3 w-3 text-green-500" />
+                {knowledgeBases.find(kb => kb.kb_id === selectedKB.kb_id)?.num_documents || 0} docs
+              </div>
+            )}
+          </span>
         </div>
       )}
     </div>

@@ -102,11 +102,12 @@ def create_tenant_routes(tenant_service: TenantService) -> APIRouter:
     ):
         """List all available tenants with pagination.
         
-        Useful for tenant selection.
+        Useful for tenant selection. This endpoint is public to allow
+        unauthenticated access for tenant selection on the login page.
         """
-        # Validate auth (simple check for now, ideally check for valid user)
-        if not authorization:
-             raise HTTPException(status_code=401, detail="Missing authorization header")
+        # Note: This endpoint is intentionally public to support tenant selection
+        # on the login page before authentication. In production, you may want to
+        # restrict this to specific IPs or use rate limiting.
              
         try:
             # Validate pagination parameters
@@ -476,8 +477,17 @@ def create_tenant_routes(tenant_service: TenantService) -> APIRouter:
              raise HTTPException(status_code=401, detail="Missing authorization header")
              
         try:
+            # Extract username from token
+            from lightrag.api.auth import auth_handler
+            try:
+                scheme, token = authorization.split()
+                token_data = auth_handler.validate_token(token)
+                username = token_data.get("username")
+            except:
+                username = None
+            
             # Resolve default tenant
-            resolved_tenant_id = await resolve_default_tenant(request, tenant_id)
+            resolved_tenant_id = await resolve_default_tenant(request, tenant_id, user_id=username)
             
             # Validate pagination parameters
             page = max(1, page)

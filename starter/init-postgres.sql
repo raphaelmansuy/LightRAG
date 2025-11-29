@@ -170,9 +170,9 @@ CREATE INDEX idx_embeddings_doc_id ON embeddings(tenant_id, kb_id, document_id);
 CREATE INDEX idx_embeddings_vector ON embeddings USING ivfflat (embedding vector_cosine_ops);
 
 -- ============================================================================
--- Document Status Table
+-- Document Status Table (Legacy Single-Tenant Schema)
 -- 
--- Tracks document processing status
+-- Tracks document processing status for legacy compatibility
 -- Used to manage async document ingestion pipeline
 -- ============================================================================
 
@@ -193,6 +193,187 @@ CREATE TABLE IF NOT EXISTS document_status (
 
 CREATE INDEX idx_doc_status_tenant_kb ON document_status(tenant_id, kb_id);
 CREATE INDEX idx_doc_status_status ON document_status(tenant_id, kb_id, status);
+
+-- ============================================================================
+-- LIGHTRAG Legacy Tables
+-- 
+-- These tables support the legacy LightRAG API that uses workspace-based
+-- isolation instead of tenant_id/kb_id. They are required for backward
+-- compatibility and are automatically populated from the new multi-tenant schema.
+-- ============================================================================
+
+-- Legacy Document Status Table (workspace-based)
+CREATE TABLE IF NOT EXISTS LIGHTRAG_DOC_STATUS (
+    workspace VARCHAR(255) NOT NULL,
+    id VARCHAR(255) NOT NULL,
+    content_summary VARCHAR(255) NULL,
+    content_length INT NULL,
+    chunks_count INT NULL,
+    status VARCHAR(64) NULL,
+    file_path TEXT NULL,
+    chunks_list JSONB NULL DEFAULT '[]'::jsonb,
+    track_id VARCHAR(255) NULL,
+    metadata JSONB NULL DEFAULT '{}'::jsonb,
+    error_msg TEXT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT LIGHTRAG_DOC_STATUS_PK PRIMARY KEY (workspace, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_DOC_STATUS_workspace ON LIGHTRAG_DOC_STATUS(workspace);
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_DOC_STATUS_status ON LIGHTRAG_DOC_STATUS(workspace, status);
+
+-- Legacy Full Documents Table (workspace-based)
+CREATE TABLE IF NOT EXISTS LIGHTRAG_DOC_FULL (
+    id VARCHAR(255),
+    workspace VARCHAR(255),
+    doc_name VARCHAR(1024),
+    content TEXT,
+    meta JSONB,
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT LIGHTRAG_DOC_FULL_PK PRIMARY KEY (workspace, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_DOC_FULL_workspace ON LIGHTRAG_DOC_FULL(workspace);
+
+-- Legacy Document Chunks Table (workspace-based)
+CREATE TABLE IF NOT EXISTS LIGHTRAG_DOC_CHUNKS (
+    id VARCHAR(255),
+    workspace VARCHAR(255),
+    full_doc_id VARCHAR(256),
+    chunk_order_index INTEGER,
+    tokens INTEGER,
+    content TEXT,
+    file_path TEXT NULL,
+    llm_cache_list JSONB NULL DEFAULT '[]'::jsonb,
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT LIGHTRAG_DOC_CHUNKS_PK PRIMARY KEY (workspace, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_DOC_CHUNKS_workspace ON LIGHTRAG_DOC_CHUNKS(workspace);
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_DOC_CHUNKS_full_doc_id ON LIGHTRAG_DOC_CHUNKS(workspace, full_doc_id);
+
+-- Legacy Vector DB Chunks Table (workspace-based)
+CREATE TABLE IF NOT EXISTS LIGHTRAG_VDB_CHUNKS (
+    id VARCHAR(255),
+    workspace VARCHAR(255),
+    full_doc_id VARCHAR(256),
+    chunk_order_index INTEGER,
+    tokens INTEGER,
+    content TEXT,
+    content_vector VECTOR(1024),
+    file_path TEXT NULL,
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT LIGHTRAG_VDB_CHUNKS_PK PRIMARY KEY (workspace, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_VDB_CHUNKS_workspace ON LIGHTRAG_VDB_CHUNKS(workspace);
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_VDB_CHUNKS_vector ON LIGHTRAG_VDB_CHUNKS USING ivfflat (content_vector vector_cosine_ops);
+
+-- Legacy Vector DB Entities Table (workspace-based)
+CREATE TABLE IF NOT EXISTS LIGHTRAG_VDB_ENTITY (
+    id VARCHAR(255),
+    workspace VARCHAR(255),
+    entity_name VARCHAR(512),
+    content TEXT,
+    content_vector VECTOR(1024),
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    chunk_ids VARCHAR(255)[] NULL,
+    file_path TEXT NULL,
+    CONSTRAINT LIGHTRAG_VDB_ENTITY_PK PRIMARY KEY (workspace, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_VDB_ENTITY_workspace ON LIGHTRAG_VDB_ENTITY(workspace);
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_VDB_ENTITY_vector ON LIGHTRAG_VDB_ENTITY USING ivfflat (content_vector vector_cosine_ops);
+
+-- Legacy Vector DB Relations Table (workspace-based)
+CREATE TABLE IF NOT EXISTS LIGHTRAG_VDB_RELATION (
+    id VARCHAR(255),
+    workspace VARCHAR(255),
+    source_id VARCHAR(512),
+    target_id VARCHAR(512),
+    content TEXT,
+    content_vector VECTOR(1024),
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    chunk_ids VARCHAR(255)[] NULL,
+    file_path TEXT NULL,
+    CONSTRAINT LIGHTRAG_VDB_RELATION_PK PRIMARY KEY (workspace, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_VDB_RELATION_workspace ON LIGHTRAG_VDB_RELATION(workspace);
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_VDB_RELATION_vector ON LIGHTRAG_VDB_RELATION USING ivfflat (content_vector vector_cosine_ops);
+
+-- Legacy LLM Cache Table (workspace-based)
+CREATE TABLE IF NOT EXISTS LIGHTRAG_LLM_CACHE (
+    workspace VARCHAR(255) NOT NULL,
+    id VARCHAR(255) NOT NULL,
+    original_prompt TEXT,
+    return_value TEXT,
+    chunk_id VARCHAR(255) NULL,
+    cache_type VARCHAR(32),
+    queryparam JSONB NULL,
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT LIGHTRAG_LLM_CACHE_PK PRIMARY KEY (workspace, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_LLM_CACHE_workspace ON LIGHTRAG_LLM_CACHE(workspace);
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_LLM_CACHE_chunk_id ON LIGHTRAG_LLM_CACHE(workspace, chunk_id);
+
+-- Legacy Full Entities Table (workspace-based)
+CREATE TABLE IF NOT EXISTS LIGHTRAG_FULL_ENTITIES (
+    id VARCHAR(255),
+    workspace VARCHAR(255),
+    entity_names JSONB,
+    count INTEGER,
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT LIGHTRAG_FULL_ENTITIES_PK PRIMARY KEY (workspace, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_FULL_ENTITIES_workspace ON LIGHTRAG_FULL_ENTITIES(workspace);
+
+-- Legacy Full Relations Table (workspace-based)
+CREATE TABLE IF NOT EXISTS LIGHTRAG_FULL_RELATIONS (
+    id VARCHAR(255),
+    workspace VARCHAR(255),
+    relation_pairs JSONB,
+    count INTEGER,
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT LIGHTRAG_FULL_RELATIONS_PK PRIMARY KEY (workspace, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_FULL_RELATIONS_workspace ON LIGHTRAG_FULL_RELATIONS(workspace);
+
+-- Legacy Tenants Table (workspace-based for system metadata)
+CREATE TABLE IF NOT EXISTS LIGHTRAG_TENANTS (
+    id VARCHAR(255),
+    workspace VARCHAR(255),
+    data JSONB,
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT LIGHTRAG_TENANTS_PK PRIMARY KEY (workspace, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_TENANTS_workspace ON LIGHTRAG_TENANTS(workspace);
+
+-- Legacy Knowledge Bases Table (workspace-based for system metadata)
+CREATE TABLE IF NOT EXISTS LIGHTRAG_KNOWLEDGE_BASES (
+    id VARCHAR(255),
+    workspace VARCHAR(255),
+    data JSONB,
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT LIGHTRAG_KNOWLEDGE_BASES_PK PRIMARY KEY (workspace, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_LIGHTRAG_KNOWLEDGE_BASES_workspace ON LIGHTRAG_KNOWLEDGE_BASES(workspace);
 
 -- ============================================================================
 -- KV Storage Table

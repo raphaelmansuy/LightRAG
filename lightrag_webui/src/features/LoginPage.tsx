@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/stores/state'
 import { useSettingsStore } from '@/stores/settings'
+import { useTenantState } from '@/stores/tenant'
 import { loginToServer, getAuthStatus } from '@/api/lightrag'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
@@ -16,6 +17,7 @@ const LoginPage = () => {
   const navigate = useNavigate()
   const { login, isAuthenticated } = useAuthStore()
   const { t } = useTranslation()
+  const selectedTenant = useTenantState.use.selectedTenant()
   const [loading, setLoading] = useState(false)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -90,6 +92,12 @@ const LoginPage = () => {
       return
     }
 
+    // Validate that a tenant is selected
+    if (!selectedTenant) {
+      toast.error(t('login.selectTenantError', 'Please select a tenant to continue'))
+      return
+    }
+
     try {
       setLoading(true)
       const response = await loginToServer(username, password)
@@ -144,6 +152,12 @@ const LoginPage = () => {
   }
 
   const handleFreeLoginContinue = async () => {
+    // Validate that a tenant is selected
+    if (!selectedTenant) {
+      toast.error(t('login.selectTenantError', 'Please select a tenant to continue'))
+      return
+    }
+
     try {
       setLoading(true)
       const status = await getAuthStatus()
@@ -189,12 +203,12 @@ const LoginPage = () => {
               <label className="text-sm font-medium mb-2 block">
                 {t('login.tenant', 'Tenant')}
               </label>
-              <TenantSelector />
+              <TenantSelector hideKBSelect={true} />
             </div>
             <Button
               onClick={handleFreeLoginContinue}
               className="w-full h-11 text-base font-medium"
-              disabled={loading}
+              disabled={loading || !selectedTenant}
             >
               {loading ? t('login.loggingIn') : t('login.continue', 'Continue')}
             </Button>
@@ -262,7 +276,7 @@ const LoginPage = () => {
             <Button
               type="submit"
               className="w-full h-11 text-base font-medium mt-2"
-              disabled={loading}
+              disabled={loading || !selectedTenant}
             >
               {loading ? t('login.loggingIn') : t('login.loginButton')}
             </Button>

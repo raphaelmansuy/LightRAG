@@ -211,6 +211,7 @@ services:
       VERBOSE: ${VERBOSE:-false}
       
       # Multi-Tenant Configuration
+      MULTITENANT_MODE: ${MULTITENANT_MODE:-demo}
       DEFAULT_TENANT: ${DEFAULT_TENANT:-default}
       DEFAULT_KB: ${DEFAULT_KB:-default}
     
