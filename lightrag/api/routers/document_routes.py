@@ -1669,14 +1669,34 @@ def create_document_routes(
     # Create combined auth dependency for document routes
     combined_auth = get_combined_auth_dependency(api_key)
     
+    # SEC-001 FIX: Check strict mode configuration
+    try:
+        from lightrag.api.config import MULTI_TENANT_STRICT_MODE
+        strict_mode = MULTI_TENANT_STRICT_MODE
+    except ImportError:
+        strict_mode = False
+    
     async def get_tenant_rag(tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional)) -> LightRAG:
-        """Dependency to get tenant-specific RAG instance (optional)"""
+        """Dependency to get tenant-specific RAG instance.
+        
+        In strict multi-tenant mode, raises error if tenant context is missing.
+        In non-strict mode, falls back to global RAG for backward compatibility.
+        """
         if rag_manager and tenant_context and tenant_context.tenant_id and tenant_context.kb_id:
             return await rag_manager.get_rag_instance(
                 tenant_context.tenant_id, 
                 tenant_context.kb_id,
                 tenant_context.user_id  # Pass user_id for security validation
             )
+        
+        # SEC-001 FIX: In strict mode, don't allow fallback to global RAG
+        if strict_mode and rag_manager:
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=400,
+                detail="Tenant context required. Provide X-Tenant-ID and X-KB-ID headers."
+            )
+        
         return rag
 
     async def get_tenant_doc_manager(tenant_rag: LightRAG = Depends(get_tenant_rag)) -> DocumentManager:

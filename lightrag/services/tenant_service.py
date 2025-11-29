@@ -135,11 +135,17 @@ class TenantService:
             logger.warning("verify_user_access called with empty user_id or tenant_id")
             return False
         
-        # TEMPORARY: Allow admin users to access all tenants
-        # This is for demo/development only - should be removed in production
-        if user_id.lower() == "admin":
-            logger.debug(f"Access granted: admin user {user_id} has access to all tenants")
-            return True
+        # SEC-002 FIX: Check for super-admin users from configuration instead of hardcoded "admin"
+        # Super-admins are configured via LIGHTRAG_SUPER_ADMIN_USERS environment variable
+        try:
+            from lightrag.api.config import SUPER_ADMIN_USERS
+            if SUPER_ADMIN_USERS:
+                super_admins = [u.strip().lower() for u in SUPER_ADMIN_USERS.split(",") if u.strip()]
+                if user_id.lower() in super_admins:
+                    logger.debug(f"Access granted: super-admin user {user_id} has access to all tenants")
+                    return True
+        except ImportError:
+            pass  # Config not available, proceed with normal access check
         
         # Check membership table using PostgreSQL function
         if self.kv_storage.db:

@@ -33,22 +33,9 @@ export async function fetchTenantsPaginated(
     return response.data
   } catch (error) {
     console.error('Failed to fetch tenants paginated:', error)
-    // Return default paginated response if API not available
-    return {
-      items: [
-        {
-          tenant_id: 'default',
-          tenant_name: 'Default Tenant',
-          description: 'Default tenant for single-tenant deployments',
-        }
-      ],
-      total: 1,
-      page: 1,
-      page_size: pageSize,
-      total_pages: 1,
-      has_next: false,
-      has_prev: false
-    }
+    // WUI-002 FIX: Throw error instead of returning fake data
+    // This allows the UI to show proper error state
+    throw error
   }
 }
 
@@ -62,14 +49,9 @@ export async function fetchTenants(): Promise<Tenant[]> {
     return response.data || []
   } catch (error) {
     console.error('Failed to fetch tenants:', error)
-    // Return default tenant if API is not multi-tenant enabled
-    return [
-      {
-        tenant_id: 'default',
-        tenant_name: 'Default Tenant',
-        description: 'Default tenant for single-tenant deployments',
-      }
-    ]
+    // WUI-002 FIX: Throw error instead of returning fake data
+    // This allows the UI to show proper error state
+    throw error
   }
 }
 

@@ -285,13 +285,27 @@ async def get_tenant_context_optional(
 ) -> Optional[TenantContext]:
     """Extract tenant context from request headers (optional).
     
-    Similar to get_tenant_context but doesn't raise if missing.
-    Useful for backward compatibility with single-tenant endpoints.
+    In strict multi-tenant mode (LIGHTRAG_MULTI_TENANT_STRICT=true), this function
+    will raise an error if tenant context cannot be extracted, preventing fallback
+    to global RAG which could cause data leakage.
+    
+    In non-strict mode (default), returns None if tenant context is missing,
+    allowing backward compatibility with single-tenant deployments.
     
     Returns:
         TenantContext or None: Validated tenant context, or None if not provided
+        
+    Raises:
+        HTTPException: In strict mode, if tenant context is missing
     """
     logger.debug(f"get_tenant_context_optional: auth={bool(authorization)}, tenant_id={x_tenant_id}, kb_id={x_kb_id}")
+    
+    # SEC-001 FIX: Check if strict multi-tenant mode is enabled
+    try:
+        from lightrag.api.config import MULTI_TENANT_STRICT_MODE
+        strict_mode = MULTI_TENANT_STRICT_MODE
+    except ImportError:
+        strict_mode = False
     
     # If X-Tenant-ID is explicitly provided, we must try to resolve the tenant context
     # and propagate any errors (like missing auth or invalid KB) instead of falling back to global RAG.
@@ -301,6 +315,13 @@ async def get_tenant_context_optional(
     try:
         return await get_tenant_context(request, authorization, x_tenant_id, x_kb_id, x_api_key)
     except HTTPException as e:
+        if strict_mode:
+            # SEC-001 FIX: In strict mode, don't allow fallback to global RAG
+            logger.error(f"Tenant context required in strict mode but not provided: {e.detail}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tenant context required. Provide X-Tenant-ID and X-KB-ID headers."
+            )
         logger.warning(f"Failed to extract tenant context (optional): {e.detail}")
         return None
 

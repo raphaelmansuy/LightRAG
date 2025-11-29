@@ -11,6 +11,39 @@ export const axiosInstance = axios.create({
   }
 })
 
+// WUI-003 FIX: Endpoints that require tenant context
+// These endpoints will be blocked if no tenant/KB is selected
+const TENANT_REQUIRED_ENDPOINTS = [
+  '/documents',
+  '/query',
+  '/graph',
+  '/knowledge-bases',  // KB operations require tenant
+]
+
+// Endpoints that are exempt from tenant context check
+const TENANT_EXEMPT_ENDPOINTS = [
+  '/tenants',  // Tenant listing doesn't require tenant context
+  '/login',
+  '/health',
+  '/version',
+]
+
+function requiresTenantContext(url: string | undefined): boolean {
+  if (!url) return false
+  
+  // Check if exempt
+  for (const exempt of TENANT_EXEMPT_ENDPOINTS) {
+    if (url.includes(exempt)) return false
+  }
+  
+  // Check if requires tenant
+  for (const required of TENANT_REQUIRED_ENDPOINTS) {
+    if (url.includes(required)) return true
+  }
+  
+  return false
+}
+
 // Interceptor: add api key, authentication, and tenant context
 axiosInstance.interceptors.request.use((config) => {
   const apiKey = useSettingsStore.getState().apiKey
@@ -29,11 +62,15 @@ axiosInstance.interceptors.request.use((config) => {
   const selectedTenantJson = localStorage.getItem('SELECTED_TENANT');
   const selectedKBJson = localStorage.getItem('SELECTED_KB');
   
+  let hasTenantContext = false;
+  let hasKBContext = false;
+  
   if (selectedTenantJson) {
     try {
       const selectedTenant = JSON.parse(selectedTenantJson);
       if (selectedTenant?.tenant_id) {
         config.headers['X-Tenant-ID'] = selectedTenant.tenant_id;
+        hasTenantContext = true;
         console.log('[Axios Interceptor] Added X-Tenant-ID header:', selectedTenant.tenant_id);
       } else {
         console.warn('[Axios Interceptor] Tenant in localStorage has no tenant_id:', selectedTenant);
@@ -50,6 +87,7 @@ axiosInstance.interceptors.request.use((config) => {
       const selectedKB = JSON.parse(selectedKBJson);
       if (selectedKB?.kb_id) {
         config.headers['X-KB-ID'] = selectedKB.kb_id;
+        hasKBContext = true;
         console.log('[Axios Interceptor] Added X-KB-ID header:', selectedKB.kb_id);
       } else {
         console.warn('[Axios Interceptor] KB in localStorage has no kb_id:', selectedKB);
@@ -59,6 +97,12 @@ axiosInstance.interceptors.request.use((config) => {
     }
   } else {
     console.log('[Axios Interceptor] No SELECTED_KB in localStorage (ok for some requests)');
+  }
+
+  // WUI-003 FIX: Block requests to tenant-required endpoints without proper context
+  if (requiresTenantContext(config.url) && (!hasTenantContext || !hasKBContext)) {
+    console.error('[Axios Interceptor] Tenant context required but missing for:', config.url);
+    throw new axios.Cancel('Please select a tenant and knowledge base before performing this action.');
   }
 
   console.log('[Axios Interceptor] Request headers:', {

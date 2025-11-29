@@ -118,6 +118,13 @@ class TenantRAGManager:
             if not tenant or not tenant.is_active:
                 raise ValueError(f"Tenant {tenant_id} not found or inactive")
             
+            # SEC-003 FIX: Check if user authentication is required
+            try:
+                from lightrag.api.config import REQUIRE_USER_AUTH
+                require_auth = REQUIRE_USER_AUTH
+            except ImportError:
+                require_auth = False
+            
             # SECURITY: Verify user has access to this tenant
             if user_id:
                 has_access = await self.tenant_service.verify_user_access(user_id, tenant_id)
@@ -126,6 +133,11 @@ class TenantRAGManager:
                         f"Access denied: user={user_id} attempted to access tenant={tenant_id}"
                     )
                     raise PermissionError(f"Access denied to tenant {tenant_id}")
+            elif require_auth:
+                logger.error(
+                    f"Access denied: user_id required but not provided for tenant={tenant_id}"
+                )
+                raise PermissionError("User authentication required for tenant access")
             else:
                 logger.warning(
                     f"No user_id provided for tenant access - allowing for backward compatibility"
