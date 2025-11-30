@@ -166,6 +166,14 @@ class LightRAGClient:
             
         raise Exception("Timeout waiting for indexing")
 
+    def clear_cache(self, tenant_id, kb_id):
+        print_step(f"Clearing cache in Tenant: {tenant_id}, KB: {kb_id}")
+        headers = {"X-Tenant-ID": tenant_id, "X-KB-ID": kb_id}
+        response = self.session.post(f"{self.base_url}/documents/clear_cache", json={}, headers=headers)
+        if response.status_code != 200:
+            raise Exception(f"Clear cache failed: {response.text}")
+        print_success("Cache cleared")
+
     def wait_for_pipeline(self, tenant_id, kb_id, timeout=60):
         print_step(f"Waiting for pipeline to be idle in Tenant: {tenant_id}, KB: {kb_id}...")
         headers = {"X-Tenant-ID": tenant_id, "X-KB-ID": kb_id}
