@@ -148,7 +148,7 @@ class TenantService:
             pass  # Config not available, proceed with normal access check
         
         # Check membership table using PostgreSQL function
-        if self.kv_storage.db:
+        if hasattr(self.kv_storage, 'db') and self.kv_storage.db:
             try:
                 result = await self.kv_storage.db.query(
                     "SELECT has_tenant_access($1, $2, $3) as has_access",

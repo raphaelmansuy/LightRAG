@@ -748,6 +748,7 @@ def create_app(args):
 
         # Regular user login
         role = "admin" if username == "admin" else "user"
+        print(f"DEBUG: Login user={username}, role={role}")
         user_token = auth_handler.create_token(
             username=username, role=role, metadata={"auth_mode": "enabled"}
         )

@@ -1,4 +1,5 @@
-#!/bin/bash
+
+content = r"""#!/bin/bash
 
 # ==============================================================================
 # LightRAG E2E Test Runner
@@ -204,3 +205,7 @@ else
     run_test_suite "$BACKEND"
     exit $?
 fi
+"""
+
+with open("e2e/run_isolation_test.sh", "w") as f:
+    f.write(content)

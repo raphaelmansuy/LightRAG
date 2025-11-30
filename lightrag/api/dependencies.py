@@ -484,6 +484,7 @@ async def get_admin_context(
     
     # Validate token
     token_data = auth_handler.validate_token(token)
+    print(f"DEBUG: get_admin_context token_data={token_data}")
     
     # Check for admin role
     if token_data.get("role") != "admin":
