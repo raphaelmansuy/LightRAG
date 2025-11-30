@@ -11,12 +11,12 @@ const getBackendUrl = (): string => {
   if (typeof window !== 'undefined') {
     const protocol = window.location.protocol
     const host = window.location.host
-    // Assume API is at :8000 on same host (standard dev port), or check if specified in environment
-    return `${protocol}//${host.split(':')[0]}:8000`
+    // Assume API is at :9621 on same host (standard dev port), or check if specified in environment
+    return `${protocol}//${host.split(':')[0]}:9621`
   }
   
-  // Fallback to localhost on port 8000 (standard development port)
-  return 'http://localhost:8000'
+  // Fallback to localhost on port 9621 (standard development port)
+  return 'http://localhost:9621'
 }
 
 export const backendBaseUrl = getBackendUrl()

@@ -1451,9 +1451,11 @@ async def background_delete_documents(
     from lightrag.kg.shared_storage import (
         get_namespace_data,
         get_pipeline_status_lock,
+        initialize_pipeline_status,
     )
 
-    pipeline_status = await get_namespace_data("pipeline_status")
+    await initialize_pipeline_status(rag.pipeline_status_key)
+    pipeline_status = await get_namespace_data(rag.pipeline_status_key)
     pipeline_status_lock = get_pipeline_status_lock()
 
     total_docs = len(doc_ids)
@@ -1980,10 +1982,12 @@ def create_document_routes(
         from lightrag.kg.shared_storage import (
             get_namespace_data,
             get_pipeline_status_lock,
+            initialize_pipeline_status,
         )
 
         # Get pipeline status and lock
-        pipeline_status = await get_namespace_data("pipeline_status")
+        await initialize_pipeline_status(tenant_rag.pipeline_status_key)
+        pipeline_status = await get_namespace_data(tenant_rag.pipeline_status_key)
         pipeline_status_lock = get_pipeline_status_lock()
 
         # Check and set status with lock
@@ -2146,7 +2150,7 @@ def create_document_routes(
         dependencies=[Depends(combined_auth)],
         response_model=PipelineStatusResponse,
     )
-    async def get_pipeline_status() -> PipelineStatusResponse:
+    async def get_pipeline_status(tenant_rag: LightRAG = Depends(get_tenant_rag)) -> PipelineStatusResponse:
         """
         Get the current status of the document indexing pipeline.
 
@@ -2174,9 +2178,11 @@ def create_document_routes(
             from lightrag.kg.shared_storage import (
                 get_namespace_data,
                 get_all_update_flags_status,
+                initialize_pipeline_status,
             )
 
-            pipeline_status = await get_namespace_data("pipeline_status")
+            await initialize_pipeline_status(tenant_rag.pipeline_status_key)
+            pipeline_status = await get_namespace_data(tenant_rag.pipeline_status_key)
 
             # Get update flags status for all namespaces
             update_status = await get_all_update_flags_status()
@@ -2399,7 +2405,7 @@ def create_document_routes(
         try:
             from lightrag.kg.shared_storage import get_namespace_data
 
-            pipeline_status = await get_namespace_data("pipeline_status")
+            pipeline_status = await get_namespace_data(tenant_rag.pipeline_status_key)
 
             # Check if pipeline is busy
             if pipeline_status.get("busy", False):

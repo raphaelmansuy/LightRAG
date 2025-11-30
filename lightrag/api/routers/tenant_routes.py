@@ -203,10 +203,28 @@ def create_tenant_routes(tenant_service: TenantService) -> APIRouter:
         This allows creating the initial tenant(s) for new organizations.
         """
         try:
+            username = admin_context.get("username")
+            
             tenant = await tenant_service.create_tenant(
                 tenant_name=request.name,
                 description=request.description or "",
+                created_by=username
             )
+            
+            # Add creator as owner
+            if username:
+                try:
+                    await tenant_service.add_user_to_tenant(
+                        user_id=username,
+                        tenant_id=tenant.tenant_id,
+                        role="owner",
+                        created_by=username
+                    )
+                    logger.info(f"Added user {username} as owner of new tenant {tenant.tenant_id}")
+                except Exception as e:
+                    logger.error(f"Failed to add creator as owner: {e}")
+                    # Continue anyway, as tenant was created
+            
             return TenantResponse(
                 tenant_id=tenant.tenant_id,
                 name=tenant.tenant_name,

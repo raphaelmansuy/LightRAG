@@ -57,6 +57,7 @@ from lightrag.kg.shared_storage import (
     get_pipeline_status_lock,
     get_graph_db_lock,
     get_data_init_lock,
+    initialize_pipeline_status,
 )
 
 from lightrag.base import (
@@ -383,6 +384,11 @@ class LightRAG:
     """Configuration for Ollama server information."""
 
     _storages_status: StoragesStatus = field(default=StoragesStatus.NOT_CREATED)
+
+    @property
+    def pipeline_status_key(self) -> str:
+        """Get the namespaced pipeline status key for this instance."""
+        return f"pipeline_status_{compute_mdhash_id(self.working_dir)}"
 
     def __post_init__(self):
         from lightrag.kg.shared_storage import (
@@ -1376,7 +1382,8 @@ class LightRAG:
         """
 
         # Get pipeline status shared data and lock
-        pipeline_status = await get_namespace_data("pipeline_status")
+        await initialize_pipeline_status(self.pipeline_status_key)
+        pipeline_status = await get_namespace_data(self.pipeline_status_key)
         pipeline_status_lock = get_pipeline_status_lock()
 
         # Check if another process is already processing the queue
@@ -2433,7 +2440,7 @@ class LightRAG:
                 }
 
             # Extract structured data from query result
-            raw_data = query_result.raw_data if query_result else {}
+            raw_data = query_result.raw_data if query_result and query_result.raw_data else {}
             raw_data["llm_response"] = {
                 "content": query_result.content
                 if not query_result.is_streaming
