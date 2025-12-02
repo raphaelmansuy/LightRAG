@@ -11,37 +11,48 @@ export const axiosInstance = axios.create({
   }
 })
 
-// WUI-003 FIX: Endpoints that require tenant context
-// These endpoints will be blocked if no tenant/KB is selected
-const TENANT_REQUIRED_ENDPOINTS = [
+// Endpoints that require Tenant ID but NOT KB ID
+const TENANT_ONLY_ENDPOINTS = [
+  '/knowledge-bases',
+]
+
+// Endpoints that require BOTH Tenant ID and KB ID
+const KB_REQUIRED_ENDPOINTS = [
   '/documents',
   '/query',
   '/graph',
-  '/knowledge-bases',  // KB operations require tenant
 ]
 
-// Endpoints that are exempt from tenant context check
-const TENANT_EXEMPT_ENDPOINTS = [
-  '/tenants',  // Tenant listing doesn't require tenant context
+// Endpoints that are exempt from any context check
+const EXEMPT_ENDPOINTS = [
+  '/tenants',
   '/login',
   '/health',
   '/version',
+  '/auth-status',
 ]
 
-function requiresTenantContext(url: string | undefined): boolean {
-  if (!url) return false
+type ContextRequirement = 'none' | 'tenant' | 'kb'
+
+function getContextRequirement(url: string | undefined): ContextRequirement {
+  if (!url) return 'none'
   
   // Check if exempt
-  for (const exempt of TENANT_EXEMPT_ENDPOINTS) {
-    if (url.includes(exempt)) return false
+  for (const exempt of EXEMPT_ENDPOINTS) {
+    if (url.includes(exempt)) return 'none'
   }
   
-  // Check if requires tenant
-  for (const required of TENANT_REQUIRED_ENDPOINTS) {
-    if (url.includes(required)) return true
+  // Check if requires KB (which implies Tenant)
+  for (const required of KB_REQUIRED_ENDPOINTS) {
+    if (url.includes(required)) return 'kb'
+  }
+
+  // Check if requires Tenant only
+  for (const required of TENANT_ONLY_ENDPOINTS) {
+    if (url.includes(required)) return 'tenant'
   }
   
-  return false
+  return 'none'
 }
 
 // Interceptor: add api key, authentication, and tenant context
@@ -100,9 +111,18 @@ axiosInstance.interceptors.request.use((config) => {
   }
 
   // WUI-003 FIX: Block requests to tenant-required endpoints without proper context
-  if (requiresTenantContext(config.url) && (!hasTenantContext || !hasKBContext)) {
-    console.error('[Axios Interceptor] Tenant context required but missing for:', config.url);
-    throw new axios.Cancel('Please select a tenant and knowledge base before performing this action.');
+  const requirement = getContextRequirement(config.url);
+  
+  if (requirement === 'kb') {
+    if (!hasTenantContext || !hasKBContext) {
+      console.error('[Axios Interceptor] KB context required but missing for:', config.url);
+      throw new axios.Cancel('Please select a tenant and knowledge base before performing this action.');
+    }
+  } else if (requirement === 'tenant') {
+    if (!hasTenantContext) {
+      console.error('[Axios Interceptor] Tenant context required but missing for:', config.url);
+      throw new axios.Cancel('Please select a tenant before performing this action.');
+    }
   }
 
   console.log('[Axios Interceptor] Request headers:', {
@@ -126,7 +146,28 @@ axiosInstance.interceptors.response.use(
         if (error.config?.url?.includes('/login')) {
           throw error;
         }
-        // For other APIs, navigate to login page
+
+        // Clear stored auth + tenant context to force re-login
+        try {
+          localStorage.removeItem('LIGHTRAG-API-TOKEN');
+          localStorage.removeItem('SELECTED_TENANT');
+          localStorage.removeItem('SELECTED_KB');
+        } catch (e) {
+          console.warn('[axios interceptor] Failed to clear localStorage on 401', e)
+        }
+
+        // Update auth state (if store available) and navigate to login
+        try {
+          // Importing the store lazily to avoid circular deps in build
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const authStore = require('@/stores/state').useAuthStore
+          if (authStore && authStore.getState) {
+            authStore.getState().logout()
+          }
+        } catch (e) {
+          console.debug('[axios interceptor] Could not access auth store to logout', e)
+        }
+
         navigationService.navigateToLogin();
 
         // return a reject Promise

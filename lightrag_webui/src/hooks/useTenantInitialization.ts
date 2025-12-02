@@ -43,20 +43,48 @@ export function useTenantInitialization() {
       )
       setTenants(availableTenants)
 
-      // Select first tenant if none selected
-      if (!selectedTenant) {
+      // Determine which tenant to use (existing or first available)
+      // We re-read from store/localStorage here to ensure we have the latest value
+      // in case it was updated during the async fetch
+      let currentTenant = useTenantState.getState().selectedTenant
+      
+      // Fallback: Check localStorage directly if store is empty
+      if (!currentTenant) {
+        try {
+          const stored = localStorage.getItem('SELECTED_TENANT')
+          if (stored) {
+            currentTenant = JSON.parse(stored)
+            console.log('[TenantInit] Recovered tenant from localStorage:', currentTenant?.tenant_id)
+            // Sync back to store
+            if (currentTenant) {
+              setSelectedTenant(currentTenant)
+            }
+          }
+        } catch (e) {
+          console.error('[TenantInit] Failed to parse localStorage fallback', e)
+        }
+      }
+
+      console.log('[TenantInit] Current tenant resolved to:', currentTenant?.tenant_id)
+      
+      if (!currentTenant) {
         const firstTenant = availableTenants[0]
         console.log('[TenantInit] Auto-selecting first tenant:', firstTenant.tenant_id)
         setSelectedTenant(firstTenant)
+        currentTenant = firstTenant
+      } else {
+        console.log('[TenantInit] Using existing tenant:', currentTenant.tenant_id)
+      }
 
-        // Fetch KBs for the first tenant
+      // Ensure KB is selected for the current tenant
+      if (currentTenant && !selectedKB) {
         try {
           console.log(
             '[TenantInit] Fetching knowledge bases for tenant:',
-            firstTenant.tenant_id
+            currentTenant.tenant_id
           )
           const availableKBs: KnowledgeBase[] = await fetchKnowledgeBases(
-            firstTenant.tenant_id
+            currentTenant.tenant_id
           )
           console.log('[TenantInit] Available KBs:', availableKBs.map((kb) => kb.kb_id))
           setKnowledgeBases(availableKBs)
@@ -83,7 +111,7 @@ export function useTenantInitialization() {
       setError(error instanceof Error ? error.message : 'Failed to initialize tenant context')
       setLoading(false)
     }
-  }, [selectedTenant, setError, setKnowledgeBases, setLoading, setSelectedKB, setSelectedTenant, setTenants])
+  }, [setError, setKnowledgeBases, setLoading, setSelectedKB, setSelectedTenant, setTenants])
 
   useEffect(() => {
     // Prevent double initialization in strict mode
@@ -91,16 +119,17 @@ export function useTenantInitialization() {
       return
     }
 
-    // If tenant and KB are already selected, skip initialization
-    if (selectedTenant && selectedKB) {
+    // Check current state directly from store to avoid stale closure issues
+    const currentState = useTenantState.getState()
+    if (currentState.selectedTenant && currentState.selectedKB) {
       console.log('[TenantInit] Tenant and KB already selected, skipping auto-init', {
-        tenant: selectedTenant.tenant_id,
-        kb: selectedKB.kb_id,
+        tenant: currentState.selectedTenant.tenant_id,
+        kb: currentState.selectedKB.kb_id,
       })
       return
     }
 
     initializationAttempted.current = true
     initializeTenantContext()
-  }, [initializeTenantContext, selectedTenant, selectedKB])
+  }, [initializeTenantContext])
 }

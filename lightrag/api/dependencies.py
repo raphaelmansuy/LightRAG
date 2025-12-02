@@ -207,7 +207,13 @@ async def get_tenant_context(
             )
         
         # Validate token
-        token_data = auth_handler.validate_token(token)
+        try:
+            token_data = auth_handler.validate_token(token)
+        except Exception as e:
+            # Log the reason for failure to help debug 401s in server logs
+            logger.warning(f"Token validation error while processing request from {getattr(request.client, 'host', 'unknown')}: {e}")
+            # Re-raise so FastAPI converts it to an HTTPException response
+            raise
         username = token_data.get("username")
         metadata = token_data.get("metadata", {})
         role_str = token_data.get("role", "viewer")
@@ -364,7 +370,11 @@ async def get_tenant_context_no_kb(
         )
     
     # Validate token
-    token_data = auth_handler.validate_token(token)
+    try:
+        token_data = auth_handler.validate_token(token)
+    except Exception as e:
+        logger.warning(f"Token validation error (no-kb) while processing request from {getattr(request.client, 'host', 'unknown')}: {e}")
+        raise
     username = token_data.get("username")
     metadata = token_data.get("metadata", {})
     role_str = token_data.get("role", "viewer")

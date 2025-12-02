@@ -7,6 +7,10 @@ import sys
 # Colors for output
 GREEN = "\033[92m"
 RED = "\033[91m"
+YELLOW = "\033[93m"
+BLUE = "\033[94m"
+CYAN = "\033[96m"
+DIM = "\033[2m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
 
@@ -15,6 +19,12 @@ def print_success(msg):
 
 def print_error(msg):
     print(f"{RED}❌ {msg}{RESET}")
+
+def print_warning(msg):
+    print(f"{YELLOW}⚠️  {msg}{RESET}")
+
+def print_info(msg):
+    print(f"{BLUE}ℹ️  {msg}{RESET}")
 
 def print_step(msg):
     print(f"\n{BOLD}👉 {msg}{RESET}")
@@ -123,10 +133,16 @@ class LightRAGClient:
         print_step(f"Waiting for indexing in Tenant: {tenant_id}, KB: {kb_id}...")
         headers = {"X-Tenant-ID": tenant_id, "X-KB-ID": kb_id}
         start_time = time.time()
+        last_status = ""
+        poll_count = 0
+        
         while time.time() - start_time < timeout:
+            poll_count += 1
+            elapsed = int(time.time() - start_time)
+            
             response = self.session.get(f"{self.base_url}/documents", headers=headers)
             if response.status_code != 200:
-                print(f"Error checking documents: {response.text}")
+                print(f"  [{elapsed}s] Error checking documents: {response.text}")
                 time.sleep(2)
                 continue
                 
@@ -144,27 +160,39 @@ class LightRAGClient:
                 docs = []
             
             if not docs:
-                print("No documents found yet...")
+                if poll_count % 5 == 1:  # Print every 10 seconds
+                    print(f"  [{elapsed}s] No documents found yet, waiting...")
                 time.sleep(2)
                 continue
 
-            all_processed = True
+            # Count statuses
+            status_counts = {}
             for doc in docs:
                 if isinstance(doc, str):
-                    all_processed = False
-                    continue
-                    
-                if doc.get("status") != "processed":
-                    all_processed = False
-                    break
+                    status = "pending"
+                else:
+                    status = doc.get("status", "unknown")
+                status_counts[status] = status_counts.get(status, 0) + 1
+            
+            current_status = ", ".join([f"{k}: {v}" for k, v in sorted(status_counts.items())])
+            
+            # Only print if status changed or every 10 seconds
+            if current_status != last_status or poll_count % 5 == 1:
+                print(f"  [{elapsed}s] Documents: {current_status}")
+                last_status = current_status
+
+            all_processed = all(
+                (isinstance(doc, dict) and doc.get("status") == "processed") 
+                for doc in docs
+            )
             
             if all_processed and len(docs) > 0:
-                print_success("All documents processed")
+                print_success(f"All {len(docs)} document(s) processed in {elapsed}s")
                 return
             
             time.sleep(2)
             
-        raise Exception("Timeout waiting for indexing")
+        raise Exception(f"Timeout ({timeout}s) waiting for indexing. Last status: {last_status}")
 
     def clear_cache(self, tenant_id, kb_id):
         print_step(f"Clearing cache in Tenant: {tenant_id}, KB: {kb_id}")
@@ -194,20 +222,27 @@ class LightRAGClient:
         
         raise Exception("Timeout waiting for pipeline to be idle")
 
-    def query(self, tenant_id, kb_id, query_text):
-        print_step(f"Querying '{query_text}' in Tenant: {tenant_id}, KB: {kb_id}")
+    def query(self, tenant_id, kb_id, query_text, verbose=True):
+        if verbose:
+            print_step(f"Querying '{query_text}' in Tenant: {tenant_id}, KB: {kb_id}")
         headers = {"X-Tenant-ID": tenant_id, "X-KB-ID": kb_id}
+        
+        start_time = time.time()
         response = self.session.post(
             f"{self.base_url}/query",
             json={"query": query_text, "mode": "global"},
             headers=headers
         )
+        elapsed = time.time() - start_time
+        
         if response.status_code != 200:
             raise Exception(f"Query failed: {response.text}")
         
         result = response.json()
-        print(f"Response: {result.get('response', '')[:100]}...")
-        return result.get('response', '')
+        response_text = result.get('response', '')
+        if verbose:
+            print(f"  Response ({elapsed:.1f}s): {response_text[:150]}{'...' if len(response_text) > 150 else ''}")
+        return response_text
 
     def delete_document(self, tenant_id, kb_id, doc_id):
         print_step(f"Deleting document '{doc_id}' in Tenant: {tenant_id}, KB: {kb_id}")

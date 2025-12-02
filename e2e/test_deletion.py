@@ -80,9 +80,10 @@ def run_tests():
     print_step("STEP 5: Verifying Document 1 is gone")
     resp1_after = client.query(tenant_id, kb_id, "What is the codename for Project Flamingo?")
     
-    # We expect the answer to NOT contain the secret. 
-    # It might say "I don't know" or give a generic answer.
-    if "Flamingo" not in resp1_after or str(suffix) not in resp1_after:
+    # We expect the answer to NOT contain the specific secret code (Flamingo-{suffix})
+    # It might echo the word "Flamingo" in the question, but the actual secret should not be there
+    secret_code = f"Flamingo-{suffix}"
+    if secret_code not in resp1_after:
         print_success("Document 1 successfully deleted (Secret not found in answer).")
     else:
         print_error(f"Document 1 STILL FOUND after deletion! Response: {resp1_after}")

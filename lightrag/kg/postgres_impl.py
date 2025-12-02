@@ -225,14 +225,28 @@ class PostgreSQLDB:
             await connection.execute(  # type: ignore
                 'SET search_path = ag_catalog, "$user", public'
             )
-            await connection.execute(  # type: ignore
-                f"select create_graph('{graph_name}')"
+            
+            # Check if graph exists first to avoid error logs
+            exists = await connection.fetchval(
+                "SELECT count(*) FROM ag_catalog.ag_graph WHERE name = $1", graph_name
             )
+            
+            if exists == 0:
+                await connection.execute(  # type: ignore
+                    f"select create_graph('{graph_name}')"
+                )
         except (
             asyncpg.exceptions.InvalidSchemaNameError,
             asyncpg.exceptions.UniqueViolationError,
+            asyncpg.exceptions.DuplicateObjectError,  # Graph already exists
         ):
             pass
+        except Exception as e:
+            # Handle "already exists" error message for AGE graphs
+            if "already exists" in str(e):
+                pass
+            else:
+                raise
 
     async def _migrate_llm_cache_schema(self):
         """Migrate LLM cache schema: add new columns and remove deprecated mode field"""
@@ -1277,6 +1291,7 @@ class PostgreSQLDB:
             asyncpg.exceptions.DuplicateTableError,
             asyncpg.exceptions.DuplicateObjectError,  # Catch "already exists" error
             asyncpg.exceptions.InvalidSchemaNameError,  # Also catch for AGE extension "already exists"
+            # asyncpg.exceptions.UndefinedTableError,  # Catch "relation does not exist" for index creation
         ) as e:
             if ignore_if_exists:
                 # If the flag is set, just ignore these specific errors
@@ -3001,6 +3016,34 @@ class PGGraphStorage(BaseGraphStorage):
                     with_age=True,
                     graph_name=self.graph_name,
                 )
+
+            # Verify that essential labels exist by checking the ag_label catalog
+            # This helps catch cases where label creation silently failed
+            try:
+                async with self.db.pool.acquire() as connection:
+                    await connection.execute('SET search_path = ag_catalog, "$user", public')
+                    # Check if 'base' label exists for this graph
+                    result = await connection.fetchrow(
+                        """
+                        SELECT l.name 
+                        FROM ag_catalog.ag_label l
+                        JOIN ag_catalog.ag_graph g ON l.graph = g.graphid
+                        WHERE l.name = 'base' AND g.name = $1
+                        """,
+                        self.graph_name
+                    )
+                    if result is None:
+                        logger.warning(
+                            f"[{self.workspace}] 'base' vlabel not found for graph '{self.graph_name}', attempting to create..."
+                        )
+                        # Retry creating the vlabel
+                        await connection.execute(
+                            f"SELECT create_vlabel('{self.graph_name}', 'base')"
+                        )
+                        logger.info(f"[{self.workspace}] Successfully created 'base' vlabel for graph '{self.graph_name}'")
+            except Exception as e:
+                if "already exists" not in str(e):
+                    logger.error(f"[{self.workspace}] Failed to verify/create 'base' vlabel: {e}")
 
     async def finalize(self):
         async with get_graph_db_lock():

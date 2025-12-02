@@ -43,6 +43,8 @@ class TenantService:
         Returns:
             Created Tenant object
         """
+        import json
+        
         tenant = Tenant(
             tenant_name=tenant_name,
             description=description,
@@ -51,7 +53,30 @@ class TenantService:
             metadata=metadata or {},
         )
         
-        # Store tenant metadata
+        # Store tenant in PostgreSQL tenants table for FK integrity
+        if hasattr(self.kv_storage, 'db') and self.kv_storage.db is not None:
+            try:
+                metadata_json = json.dumps(tenant.metadata) if tenant.metadata else '{}'
+                # Use query method with RETURNING to insert tenant
+                await self.kv_storage.db.query(
+                    """
+                    INSERT INTO tenants (tenant_id, name, description, metadata, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4::jsonb, NOW(), NOW())
+                    ON CONFLICT (tenant_id) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        description = EXCLUDED.description,
+                        metadata = EXCLUDED.metadata,
+                        updated_at = NOW()
+                    RETURNING tenant_id
+                    """,
+                    [tenant.tenant_id, tenant_name, description or "", metadata_json]
+                )
+                logger.debug(f"Inserted tenant {tenant.tenant_id} into PostgreSQL tenants table")
+            except Exception as e:
+                logger.error(f"Failed to insert tenant into PostgreSQL: {e}")
+                raise
+        
+        # Store tenant metadata in KV storage
         tenant_data = tenant.to_dict()
         await self.kv_storage.upsert({
             f"{self.tenant_namespace}:{tenant.tenant_id}": tenant_data
@@ -137,15 +162,28 @@ class TenantService:
         
         # SEC-002 FIX: Check for super-admin users from configuration instead of hardcoded "admin"
         # Super-admins are configured via LIGHTRAG_SUPER_ADMIN_USERS environment variable
+        super_admins_list = []
         try:
             from lightrag.api.config import SUPER_ADMIN_USERS
             if SUPER_ADMIN_USERS:
-                super_admins = [u.strip().lower() for u in SUPER_ADMIN_USERS.split(",") if u.strip()]
-                if user_id.lower() in super_admins:
-                    logger.debug(f"Access granted: super-admin user {user_id} has access to all tenants")
-                    return True
+                super_admins_list = [u.strip().lower() for u in SUPER_ADMIN_USERS.split(",") if u.strip()]
         except ImportError:
-            pass  # Config not available, proceed with normal access check
+            pass  # Config not available
+            
+        # Fallback: If no super admins configured, default to "admin" for backward compatibility
+        # This ensures the default admin user always has access unless explicitly disabled
+        if not super_admins_list:
+            import os
+            env_super_admins = os.environ.get("LIGHTRAG_SUPER_ADMIN_USERS")
+            # If env var is not set, default to "admin". If set to empty string, it means "no super admins"
+            if env_super_admins is None:
+                super_admins_list = ["admin"]
+            elif env_super_admins.strip():
+                super_admins_list = [u.strip().lower() for u in env_super_admins.split(",") if u.strip()]
+                
+        if user_id.lower() in super_admins_list:
+            logger.debug(f"Access granted: super-admin user {user_id} has access to all tenants")
+            return True
         
         # Check membership table using PostgreSQL function
         if hasattr(self.kv_storage, 'db') and self.kv_storage.db:
@@ -154,8 +192,21 @@ class TenantService:
                     "SELECT has_tenant_access($1, $2, $3) as has_access",
                     [user_id, tenant_id, required_role]
                 )
-                if result and len(result) > 0:
-                    has_access = result[0].get('has_access', False)
+                # result is an asyncpg Record object (not a list when multirows=False)
+                # Access using dict-style: result['has_access']
+                if result is not None:
+                    # Handle both dict-like Record and raw boolean result
+                    if hasattr(result, '__getitem__'):
+                        # Try dict-style access first (asyncpg Record)
+                        try:
+                            has_access = result['has_access']
+                        except (KeyError, TypeError):
+                            # Fall back to index access if key doesn't work
+                            has_access = result[0] if len(result) > 0 else False
+                    else:
+                        # Direct boolean result
+                        has_access = bool(result)
+                    
                     if has_access:
                         logger.debug(f"Access granted: user {user_id} has {required_role}+ role for tenant {tenant_id}")
                         return True
@@ -163,7 +214,12 @@ class TenantService:
                         logger.warning(f"Access denied: user {user_id} lacks {required_role} role for tenant {tenant_id}")
                         return False
             except Exception as e:
-                logger.error(f"Error checking user access: {e}")
+                # Function might not exist if migration hasn't run - use legacy fallback
+                error_msg = str(e)
+                if "has_tenant_access" in error_msg and "does not exist" in error_msg:
+                    logger.debug(f"has_tenant_access function not found, using legacy access check")
+                else:
+                    logger.warning(f"Error checking user access: {e}")
                 # Fall through to legacy check
         
         # Legacy fallback: Check if tenant is public or user is creator
@@ -222,8 +278,8 @@ class TenantService:
             raise RuntimeError("PostgreSQL database required for membership management")
         
         try:
-            # Insert membership
-            result = await self.kv_storage.db.query(
+            # Insert membership - use multirows=True to get a list of Records
+            results = await self.kv_storage.db.query(
                 """
                 INSERT INTO user_tenant_memberships (user_id, tenant_id, role, created_by)
                 VALUES ($1, $2, $3, $4)
@@ -231,11 +287,12 @@ class TenantService:
                 DO UPDATE SET role = $3, updated_at = NOW()
                 RETURNING id, user_id, tenant_id, role, created_at, created_by, updated_at
                 """,
-                [user_id, tenant_id, role, created_by]
+                [user_id, tenant_id, role, created_by],
+                multirows=True
             )
             
-            if result and len(result) > 0:
-                membership = result[0]
+            if results and len(results) > 0:
+                membership = results[0]
                 logger.info(f"Added user {user_id} to tenant {tenant_id} with role {role}")
                 return {
                     "id": str(membership['id']),
@@ -243,7 +300,7 @@ class TenantService:
                     "tenant_id": str(membership['tenant_id']),
                     "role": str(membership['role']),
                     "created_at": membership['created_at'].isoformat() if hasattr(membership['created_at'], 'isoformat') else str(membership['created_at']),
-                    "created_by": str(membership['created_by']),
+                    "created_by": str(membership['created_by']) if membership['created_by'] else None,
                     "updated_at": membership['updated_at'].isoformat() if hasattr(membership['updated_at'], 'isoformat') else str(membership['updated_at'])
                 }
             else:
@@ -271,16 +328,17 @@ class TenantService:
             raise RuntimeError("PostgreSQL database required for membership management")
         
         try:
-            result = await self.kv_storage.db.query(
+            results = await self.kv_storage.db.query(
                 """
                 DELETE FROM user_tenant_memberships
                 WHERE user_id = $1 AND tenant_id = $2
                 RETURNING id
                 """,
-                [user_id, tenant_id]
+                [user_id, tenant_id],
+                multirows=True
             )
             
-            if result and len(result) > 0:
+            if results and len(results) > 0:
                 logger.info(f"Removed user {user_id} from tenant {tenant_id}")
                 return True
             else:
@@ -319,18 +377,19 @@ class TenantService:
             raise RuntimeError("PostgreSQL database required for membership management")
         
         try:
-            result = await self.kv_storage.db.query(
+            results = await self.kv_storage.db.query(
                 """
                 UPDATE user_tenant_memberships
                 SET role = $1, updated_at = NOW()
                 WHERE user_id = $2 AND tenant_id = $3
                 RETURNING id, user_id, tenant_id, role, created_at, created_by, updated_at
                 """,
-                [new_role, user_id, tenant_id]
+                [new_role, user_id, tenant_id],
+                multirows=True
             )
             
-            if result and len(result) > 0:
-                membership = result[0]
+            if results and len(results) > 0:
+                membership = results[0]
                 logger.info(f"Updated role for user {user_id} in tenant {tenant_id} to {new_role}")
                 return {
                     "id": str(membership['id']),
@@ -338,7 +397,7 @@ class TenantService:
                     "tenant_id": str(membership['tenant_id']),
                     "role": str(membership['role']),
                     "created_at": membership['created_at'].isoformat() if hasattr(membership['created_at'], 'isoformat') else str(membership['created_at']),
-                    "created_by": str(membership['created_by']),
+                    "created_by": str(membership['created_by']) if membership['created_by'] else None,
                     "updated_at": membership['updated_at'].isoformat() if hasattr(membership['updated_at'], 'isoformat') else str(membership['updated_at'])
                 }
             else:
@@ -389,7 +448,8 @@ class TenantService:
                 ORDER BY t.created_at DESC
                 LIMIT $2 OFFSET $3
                 """,
-                [user_id, limit, skip]
+                [user_id, limit, skip],
+                multirows=True
             )
             
             # Get total count
@@ -402,14 +462,16 @@ class TenantService:
                 [user_id]
             )
             
-            total = count_result[0]['total'] if count_result else 0
+            # count_result is a single Record when multirows=False (default)
+            total = count_result['total'] if count_result else 0
             
             tenants = []
-            for row in result:
-                tenant_dict = dict(row)
-                tenant_dict['user_role'] = tenant_dict.pop('role', None)
-                tenant_dict['member_since'] = tenant_dict.pop('member_since', None)
-                tenants.append(self._deserialize_tenant(tenant_dict))
+            if result:
+                for row in result:
+                    tenant_dict = dict(row)
+                    tenant_dict['user_role'] = tenant_dict.pop('role', None)
+                    tenant_dict['member_since'] = tenant_dict.pop('member_since', None)
+                    tenants.append(self._deserialize_tenant(tenant_dict))
             
             return {
                 "items": tenants,
@@ -450,7 +512,8 @@ class TenantService:
                 ORDER BY created_at DESC
                 LIMIT $2 OFFSET $3
                 """,
-                [tenant_id, limit, skip]
+                [tenant_id, limit, skip],
+                multirows=True
             )
             
             # Get total count
@@ -463,17 +526,19 @@ class TenantService:
                 [tenant_id]
             )
             
-            total = count_result[0]['total'] if count_result else 0
+            # count_result is a single Record when multirows=False (default)
+            total = count_result['total'] if count_result else 0
             
             members = []
-            for row in result:
-                members.append({
-                    "user_id": str(row['user_id']),
-                    "role": str(row['role']),
-                    "created_at": row['created_at'].isoformat() if hasattr(row['created_at'], 'isoformat') else str(row['created_at']),
-                    "created_by": str(row['created_by']),
-                    "updated_at": row['updated_at'].isoformat() if row['updated_at'] and hasattr(row['updated_at'], 'isoformat') else (str(row['updated_at']) if row['updated_at'] else None)
-                })
+            if result:
+                for row in result:
+                    members.append({
+                        "user_id": str(row['user_id']),
+                        "role": str(row['role']),
+                        "created_at": row['created_at'].isoformat() if hasattr(row['created_at'], 'isoformat') else str(row['created_at']),
+                        "created_by": str(row['created_by']) if row['created_by'] else None,
+                        "updated_at": row['updated_at'].isoformat() if row['updated_at'] and hasattr(row['updated_at'], 'isoformat') else (str(row['updated_at']) if row['updated_at'] else None)
+                    })
             
             return {
                 "items": members,

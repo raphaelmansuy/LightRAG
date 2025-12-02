@@ -95,11 +95,11 @@ Port:     5432 (internal-only; not forwarded to localhost by default)
 ### Supported Tenants & Knowledge Bases
 Default sample data (automatically created):
 ```
-Tenant: acme-corp
+Tenant: 595ea68b-0f3a-4dbe-8a86-9276a1bbd10c
   └─ kb-prod     (Production KB)
   └─ kb-dev      (Development KB)
 
-Tenant: techstart
+Tenant: 44bf3e0d-d633-4dea-9b74-3e24140cd7e3
   └─ kb-main     (Main KB)
   └─ kb-backup   (Backup KB)
 ```
@@ -231,19 +231,19 @@ pytest tests/test_multi_tenant_backends.py::TestDataIntegrity -v
 
 ### Manual Testing
 
-1. **Create document for tenant "acme-corp"**:
+1. **Create document for tenant "595ea68b-0f3a-4dbe-8a86-9276a1bbd10c"**:
 ```bash
 curl -X POST http://localhost:8000/api/v1/insert \
   -H "Content-Type: application/json" \
-  -H "X-Tenant-Id: acme-corp" \
+  -H "X-Tenant-Id: 595ea68b-0f3a-4dbe-8a86-9276a1bbd10c" \
   -H "X-KB-Id: kb-prod" \
   -d '{"document": "Sample document"}'
 ```
 
-2. **Query as "acme-corp"**:
+2. **Query as "595ea68b-0f3a-4dbe-8a86-9276a1bbd10c"**:
 ```bash
 curl "http://localhost:8000/api/v1/query" \
-  -H "X-Tenant-Id: acme-corp" \
+  -H "X-Tenant-Id: 595ea68b-0f3a-4dbe-8a86-9276a1bbd10c" \
   -H "X-KB-Id: kb-prod" \
   -G --data-urlencode "param=test"
 ```
@@ -251,7 +251,7 @@ curl "http://localhost:8000/api/v1/query" \
 3. **Verify isolation** - query with different tenant:
 ```bash
 curl "http://localhost:8000/api/v1/query" \
-  -H "X-Tenant-Id: techstart" \
+  -H "X-Tenant-Id: 44bf3e0d-d633-4dea-9b74-3e24140cd7e3" \
   -H "X-KB-Id: kb-main" \
   -G --data-urlencode "param=test"
 # Should return different or empty results

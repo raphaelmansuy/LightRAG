@@ -43,9 +43,7 @@ export function TenantSelector({ onTenantChange, onKBChange, hideTenantSelect = 
       try {
         const data = await fetchTenantsPaginated(1, tenantPageSize)
         setTenants(data.items)
-        if (!selectedTenant && data.items.length > 0) {
-          setSelectedTenant(data.items[0])
-        }
+        // Auto-selection is handled by useTenantInitialization hook
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load tenants')
       } finally {

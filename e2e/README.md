@@ -133,6 +133,12 @@ The interactive mode guides you through:
 
 # Quiet mode (minimal output)
 ./e2e/run_tests.sh -q
+
+# Show live server logs during test execution
+./e2e/run_tests.sh --logs
+
+# Full example with logs, OpenAI, reset, and postgres
+./e2e/run_tests.sh --openai --reset-db -b postgres --logs
 ```
 
 ### OpenAI Configuration
@@ -143,7 +149,7 @@ export OPENAI_API_KEY="sk-..."
 ./e2e/run_tests.sh --openai
 
 # The --openai flag sets:
-# - LLM: gpt-4o-mini (OpenAI)
+# - LLM: gpt-5-nano (OpenAI's fast model)
 # - Embedding: text-embedding-3-small (1536 dimensions)
 ```
 
@@ -154,7 +160,7 @@ export OPENAI_API_KEY="sk-..."
 ./e2e/run_tests.sh --reset-db
 
 # For file backend: clears rag_storage/ directory
-# For postgres: truncates all LightRAG tables
+# For postgres: Docker volume is removed and recreated
 
 # Combined with OpenAI for a fresh run
 ./e2e/run_tests.sh --openai --reset-db -b postgres
@@ -179,8 +185,11 @@ export OPENAI_API_KEY="sk-..."
 | `--skip-server` | Don't manage server | - |
 | `--keep-server` | Keep server running | - |
 | `-l, --list` | List tests and backends | - |
-| `--openai` | Use OpenAI models (gpt-4o-mini + text-embedding-3-small) | - |
+| `--openai` | Use OpenAI models (gpt-5-nano + text-embedding-3-small) | - |
 | `--reset-db` | Reset database/storage before tests | - |
+| `--skip-docker` | Don't manage Docker containers | - |
+| `--keep-docker` | Keep Docker containers running | - |
+| `--logs` | Show live server logs during tests | - |
 | `-h, --help` | Show help | - |
 | `--version` | Show version | - |
 

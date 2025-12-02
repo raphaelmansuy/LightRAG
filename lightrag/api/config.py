@@ -47,7 +47,7 @@ MULTI_TENANT_STRICT_MODE = get_env_value("LIGHTRAG_MULTI_TENANT_STRICT", True, b
 # When True, requires user authentication for tenant access (SEC-003 fix)
 REQUIRE_USER_AUTH = get_env_value("LIGHTRAG_REQUIRE_USER_AUTH", True, bool)
 # Comma-separated list of super-admin usernames (SEC-002 fix)
-SUPER_ADMIN_USERS = get_env_value("LIGHTRAG_SUPER_ADMIN_USERS", "")
+SUPER_ADMIN_USERS = get_env_value("LIGHTRAG_SUPER_ADMIN_USERS", "admin")
 
 # use the .env that is inside the current folder
 # allows to use different .env file for each lightrag instance
@@ -239,7 +239,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--llm-binding",
         type=str,
-        default=get_env_value("LLM_BINDING", "ollama"),
+        default=get_env_value("LLM_BINDING", "openai"),
         choices=[
             "lollms",
             "ollama",
@@ -248,7 +248,7 @@ def parse_args() -> argparse.Namespace:
             "azure_openai",
             "aws_bedrock",
         ],
-        help="LLM binding type (default: from env or ollama)",
+        help="LLM binding type (default: from env or openai)",
     )
     parser.add_argument(
         "--embedding-binding",

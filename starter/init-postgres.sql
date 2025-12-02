@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS tenants (
     tenant_id VARCHAR(255) UNIQUE NOT NULL,
     name VARCHAR(255) NOT NULL,
     description TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -399,25 +400,94 @@ CREATE INDEX idx_kv_tenant_kb ON kv_storage(tenant_id, kb_id);
 CREATE INDEX idx_kv_expiry ON kv_storage(expiry_at);
 
 -- ============================================================================
+-- User Tenant Memberships Table (RBAC)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS user_tenant_memberships (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id VARCHAR(255) NOT NULL,
+    tenant_id VARCHAR(255) NOT NULL,
+    role VARCHAR(50) NOT NULL DEFAULT 'viewer',
+    created_by VARCHAR(255),
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+    CONSTRAINT uk_user_tenant UNIQUE(user_id, tenant_id),
+    CONSTRAINT chk_role CHECK (role IN ('owner', 'admin', 'editor', 'viewer'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_memberships_user ON user_tenant_memberships(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_memberships_tenant ON user_tenant_memberships(tenant_id);
+
+-- ============================================================================
+-- Tenant Access Helper Function
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION has_tenant_access(
+    p_user_id VARCHAR(255),
+    p_tenant_id VARCHAR(255),
+    p_required_role VARCHAR(50) DEFAULT 'viewer'
+) RETURNS BOOLEAN AS $$
+DECLARE
+    v_user_role VARCHAR(50);
+    v_role_hierarchy INTEGER;
+    v_required_hierarchy INTEGER;
+BEGIN
+    -- Get user's role for the tenant
+    SELECT role INTO v_user_role
+    FROM user_tenant_memberships
+    WHERE user_id = p_user_id AND tenant_id = p_tenant_id;
+    
+    -- If no membership found, check if tenant is public
+    IF v_user_role IS NULL THEN
+        RETURN EXISTS (
+            SELECT 1 FROM tenants 
+            WHERE tenant_id = p_tenant_id 
+            AND (metadata->>'is_public')::boolean = true
+        );
+    END IF;
+    
+    -- Role hierarchy: owner(4) > admin(3) > editor(2) > viewer(1)
+    v_role_hierarchy := CASE v_user_role
+        WHEN 'owner' THEN 4
+        WHEN 'admin' THEN 3
+        WHEN 'editor' THEN 2
+        WHEN 'viewer' THEN 1
+        ELSE 0
+    END;
+    
+    v_required_hierarchy := CASE p_required_role
+        WHEN 'owner' THEN 4
+        WHEN 'admin' THEN 3
+        WHEN 'editor' THEN 2
+        WHEN 'viewer' THEN 1
+        ELSE 0
+    END;
+    
+    RETURN v_role_hierarchy >= v_required_hierarchy;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================================================
 -- Sample Data for Testing Multi-Tenant Features
 -- ============================================================================
 
 -- Insert sample tenants
 INSERT INTO tenants (tenant_id, name, description) VALUES
-    ('acme-corp', 'Acme Corporation', 'Enterprise customer - production deployment'),
-    ('techstart', 'TechStart Inc', 'Startup customer - evaluation environment')
+    ('595ea68b-0f3a-4dbe-8a86-9276a1bbd10c', 'Acme Corporation', 'Enterprise customer - production deployment'),
+    ('44bf3e0d-d633-4dea-9b74-3e24140cd7e3', 'TechStart Inc', 'Startup customer - evaluation environment')
 ON CONFLICT (tenant_id) DO NOTHING;
 
 -- Insert sample knowledge bases for Acme Corp
 INSERT INTO knowledge_bases (tenant_id, kb_id, name, description) VALUES
-    ('acme-corp', 'kb-prod', 'Production KB', 'Production knowledge base for Acme Corp'),
-    ('acme-corp', 'kb-dev', 'Development KB', 'Development knowledge base for Acme Corp')
+    ('595ea68b-0f3a-4dbe-8a86-9276a1bbd10c', 'kb-prod', 'Production KB', 'Production knowledge base for Acme Corp'),
+    ('595ea68b-0f3a-4dbe-8a86-9276a1bbd10c', 'kb-dev', 'Development KB', 'Development knowledge base for Acme Corp')
 ON CONFLICT (tenant_id, kb_id) DO NOTHING;
 
 -- Insert sample knowledge bases for TechStart
 INSERT INTO knowledge_bases (tenant_id, kb_id, name, description) VALUES
-    ('techstart', 'kb-main', 'Main KB', 'Main knowledge base for TechStart'),
-    ('techstart', 'kb-backup', 'Backup KB', 'Backup knowledge base for TechStart')
+    ('44bf3e0d-d633-4dea-9b74-3e24140cd7e3', 'kb-main', 'Main KB', 'Main knowledge base for TechStart'),
+    ('44bf3e0d-d633-4dea-9b74-3e24140cd7e3', 'kb-backup', 'Backup KB', 'Backup knowledge base for TechStart')
 ON CONFLICT (tenant_id, kb_id) DO NOTHING;
 
 -- ============================================================================

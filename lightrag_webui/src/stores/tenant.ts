@@ -88,12 +88,18 @@ const useTenantStateStoreBase = create<TenantState>()((set, get) => ({
   error: null,
 
   setSelectedTenant: (tenant) => {
+    console.log('[TenantStore] setSelectedTenant called with:', tenant)
+    if (!tenant) {
+      console.trace('[TenantStore] Clearing tenant selection')
+    }
     set({ selectedTenant: tenant, selectedKB: null })
     if (tenant) {
       localStorage.setItem('SELECTED_TENANT', JSON.stringify(tenant))
     } else {
       localStorage.removeItem('SELECTED_TENANT')
     }
+    // Always clear KB selection when tenant changes to prevent mismatch
+    localStorage.removeItem('SELECTED_KB')
   },
 
   setSelectedKB: (kb) => {

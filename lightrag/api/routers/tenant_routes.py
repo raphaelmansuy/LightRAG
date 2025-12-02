@@ -498,10 +498,16 @@ def create_tenant_routes(tenant_service: TenantService) -> APIRouter:
             # Extract username from token
             from lightrag.api.auth import auth_handler
             try:
+                print(f"DEBUG: Validating token: {authorization[:30]}...")
+                logger.info(f"Validating token: {authorization[:30]}...")
                 scheme, token = authorization.split()
                 token_data = auth_handler.validate_token(token)
                 username = token_data.get("username")
-            except:
+                print(f"DEBUG: Token valid for user: {username}")
+                logger.info(f"Token valid for user: {username}")
+            except Exception as e:
+                print(f"DEBUG: Token validation failed: {e}")
+                logger.error(f"Token validation failed: {e}")
                 username = None
             
             # Resolve default tenant

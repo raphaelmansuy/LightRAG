@@ -326,7 +326,7 @@ export const queryTextStream = async (
   const selectedTenantJson = localStorage.getItem('SELECTED_TENANT');
   const selectedKBJson = localStorage.getItem('SELECTED_KB');
   
-  const headers: HeadersInit = {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Accept': 'application/x-ndjson',
   };
@@ -344,10 +344,14 @@ export const queryTextStream = async (
       const selectedTenant = JSON.parse(selectedTenantJson);
       if (selectedTenant?.tenant_id) {
         headers['X-Tenant-ID'] = selectedTenant.tenant_id;
+      } else {
+        console.warn('[queryTextStream] Tenant object missing tenant_id');
       }
     } catch (e) {
       console.error('[queryTextStream] Failed to parse selected tenant:', e);
     }
+  } else {
+    console.warn('[queryTextStream] No SELECTED_TENANT in localStorage');
   }
   
   if (selectedKBJson) {
@@ -361,7 +365,20 @@ export const queryTextStream = async (
     }
   }
 
+  // Check if tenant context is missing (required for strict mode)
+  if (!headers['X-Tenant-ID']) {
+    const errorMsg = 'Tenant context required. Please select a tenant.';
+    console.error(errorMsg);
+    if (onError) {
+      onError(errorMsg);
+      return;
+    }
+    // If no onError provided, we let it fail or throw
+    throw new Error(errorMsg);
+  }
+
   try {
+    console.log('[queryTextStream] Sending request to', `${backendBaseUrl}/query/stream`);
     const response = await fetch(`${backendBaseUrl}/query/stream`, {
       method: 'POST',
       headers: headers,
