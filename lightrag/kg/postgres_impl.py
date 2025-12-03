@@ -216,12 +216,15 @@ class PostgreSQLDB:
         """Set the Apache AGE environment and creates a graph if it does not exist.
 
         This method:
+        - Loads the AGE extension into the current session (required for Cypher functions).
         - Sets the PostgreSQL `search_path` to include `ag_catalog`, ensuring that Apache AGE functions can be used without specifying the schema.
         - Attempts to create a new graph with the provided `graph_name` if it does not already exist.
         - Silently ignores errors related to the graph already existing.
 
         """
         try:
+            # Load AGE extension - required for Cypher functions to work
+            await connection.execute("LOAD 'age'")  # type: ignore
             await connection.execute(  # type: ignore
                 'SET search_path = ag_catalog, "$user", public'
             )
@@ -3021,6 +3024,7 @@ class PGGraphStorage(BaseGraphStorage):
             # This helps catch cases where label creation silently failed
             try:
                 async with self.db.pool.acquire() as connection:
+                    await connection.execute("LOAD 'age'")  # Required for AGE functions
                     await connection.execute('SET search_path = ag_catalog, "$user", public')
                     # Check if 'base' label exists for this graph
                     result = await connection.fetchrow(
