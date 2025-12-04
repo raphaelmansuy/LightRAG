@@ -41,12 +41,20 @@ class TestStorageLayerBackwardCompatibility:
         """Test that StorageNameSpace works without tenant_id field."""
         from lightrag.base import StorageNameSpace
 
-        # Create a StorageNameSpace without tenant_id (legacy behavior)
-        namespace = StorageNameSpace()
-        
+        # Create a minimal concrete subclass for testing purposes
+        class DummyStorage(StorageNameSpace):
+            async def index_done_callback(self) -> None:
+                return None
+
+            async def drop(self) -> dict[str, str]:
+                return {"status": "success", "message": "dropped"}
+
+        # Create instance without tenant_id (legacy-like behavior)
+        namespace = DummyStorage(namespace="test", workspace="ws", global_config={})
+
         # Should have workspace set
         assert hasattr(namespace, 'workspace')
-        
+
         # tenant_id should be optional (getattr should return None)
         tenant_id = getattr(namespace, 'tenant_id', None)
         assert tenant_id is None
@@ -55,8 +63,15 @@ class TestStorageLayerBackwardCompatibility:
         """Test StorageNameSpace works with workspace-only configuration."""
         from lightrag.base import StorageNameSpace
 
-        # Legacy usage: creating namespace with just workspace
-        namespace = StorageNameSpace(workspace="test-workspace")
+        class DummyStorage(StorageNameSpace):
+            async def index_done_callback(self) -> None:
+                return None
+
+            async def drop(self) -> dict[str, str]:
+                return {"status": "success", "message": "dropped"}
+
+        # Legacy usage: creating namespace with just workspace (using dummy concrete class)
+        namespace = DummyStorage(namespace="test", workspace="test-workspace", global_config={})
         
         # Should work without errors
         assert namespace.workspace == "test-workspace"
@@ -110,9 +125,33 @@ class TestTenantServiceOptionalUsage:
     async def test_tenant_service_initialization(self):
         """Test that TenantService initializes without errors."""
         from lightrag.services.tenant_service import TenantService
+        from lightrag.base import BaseKVStorage
 
-        # Should initialize without requiring configuration
-        service = TenantService()
+        # Provide a minimal in-memory KV storage implementation for tests
+        class FakeKV(BaseKVStorage):
+            async def index_done_callback(self) -> None:
+                return None
+
+            async def drop(self) -> dict[str, str]:
+                return {"status": "success", "message": "dropped"}
+
+            async def get_by_id(self, id: str):
+                return None
+
+            async def get_by_ids(self, ids: list[str]):
+                return []
+
+            async def filter_keys(self, keys: set[str]) -> set[str]:
+                return set()
+
+            async def upsert(self, data: dict[str, dict]):
+                return None
+
+            async def delete(self, ids: list[str]) -> None:
+                return None
+
+        # Should initialize with a KV storage instance
+        service = TenantService(FakeKV(namespace="kv", workspace="kv", global_config={}))
         assert service is not None
 
     @pytest.mark.asyncio
@@ -120,17 +159,48 @@ class TestTenantServiceOptionalUsage:
         """Test basic CRUD operations on TenantService."""
         from lightrag.services.tenant_service import TenantService
 
-        service = TenantService()
+        from lightrag.base import BaseKVStorage
+
+        class FakeKV(BaseKVStorage):
+            def __init__(self, namespace, workspace, global_config):
+                super().__init__(namespace=namespace, workspace=workspace, global_config=global_config)
+                self.store: dict[str, dict] = {}
+
+            async def index_done_callback(self) -> None:
+                return None
+
+            async def drop(self) -> dict[str, str]:
+                self.store.clear()
+                return {"status": "success", "message": "dropped"}
+
+            async def get_by_id(self, id: str):
+                return self.store.get(id)
+
+            async def get_by_ids(self, ids: list[str]):
+                return [self.store.get(i) for i in ids if i in self.store]
+
+            async def filter_keys(self, keys: set[str]) -> set[str]:
+                return {k for k in keys if k in self.store}
+
+            async def upsert(self, data: dict[str, dict]):
+                for k, v in data.items():
+                    self.store[k] = v
+
+            async def delete(self, ids: list[str]) -> None:
+                for i in ids:
+                    self.store.pop(i, None)
+
+        service = TenantService(FakeKV(namespace="kv", workspace="kv", global_config={}))
         
         # Create a tenant
         tenant = await service.create_tenant(
-            name="Test Tenant",
+            tenant_name="Test Tenant",
             description="Test Description",
             metadata={}
         )
         
         assert tenant is not None
-        assert tenant.name == "Test Tenant"
+        assert tenant.tenant_name == "Test Tenant"
         assert tenant.tenant_id is not None
 
         # Get the tenant
@@ -141,10 +211,10 @@ class TestTenantServiceOptionalUsage:
         # Update the tenant
         updated = await service.update_tenant(
             tenant.tenant_id,
-            name="Updated Name"
+            tenant_name="Updated Name"
         )
         assert updated is not None
-        assert updated.name == "Updated Name"
+        assert updated.tenant_name == "Updated Name"
 
         # Delete the tenant
         deleted = await service.delete_tenant(tenant.tenant_id)
@@ -167,7 +237,25 @@ class TestMultiTenantOptionalness:
         from fastapi.testclient import TestClient
 
         app = FastAPI()
-        service = TenantService()
+        from lightrag.base import BaseKVStorage
+
+        class FakeKV(BaseKVStorage):
+            async def index_done_callback(self) -> None:
+                return None
+            async def drop(self) -> dict[str, str]:
+                return {"status": "success", "message": "dropped"}
+            async def get_by_id(self, id: str):
+                return None
+            async def get_by_ids(self, ids: list[str]):
+                return []
+            async def filter_keys(self, keys: set[str]) -> set[str]:
+                return set()
+            async def upsert(self, data: dict[str, dict]):
+                return None
+            async def delete(self, ids: list[str]) -> None:
+                return None
+
+        service = TenantService(FakeKV(namespace="kv", workspace="kv", global_config={}))
         
         # Register tenant routes
         router = create_tenant_routes(service)
