@@ -46,7 +46,13 @@ export async function fetchTenantsPaginated(
 export async function fetchTenants(): Promise<Tenant[]> {
   try {
     const response = await apiClient.get('/api/v1/tenants')
-    return response.data || []
+    // Handle both paginated response format and legacy array format
+    const data = response.data
+    if (Array.isArray(data)) {
+      return data
+    }
+    // New paginated format returns { items: [...], total: N, ... }
+    return data?.items || []
   } catch (error) {
     console.error('Failed to fetch tenants:', error)
     // WUI-002 FIX: Throw error instead of returning fake data

@@ -88,11 +88,13 @@ const useTenantStateStoreBase = create<TenantState>()((set, get) => ({
   error: null,
 
   setSelectedTenant: (tenant) => {
-    console.log('[TenantStore] setSelectedTenant called with:', tenant)
+    console.log('[TenantStore] setSelectedTenant called with:', tenant?.tenant_id)
     if (!tenant) {
       console.trace('[TenantStore] Clearing tenant selection')
     }
-    set({ selectedTenant: tenant, selectedKB: null })
+    
+    // IMPORTANT: Update localStorage FIRST before updating store
+    // This ensures axios interceptor has correct context when API calls are triggered
     if (tenant) {
       localStorage.setItem('SELECTED_TENANT', JSON.stringify(tenant))
     } else {
@@ -100,15 +102,23 @@ const useTenantStateStoreBase = create<TenantState>()((set, get) => ({
     }
     // Always clear KB selection when tenant changes to prevent mismatch
     localStorage.removeItem('SELECTED_KB')
+    
+    // Then update the store (which may trigger effects)
+    set({ selectedTenant: tenant, selectedKB: null })
   },
 
   setSelectedKB: (kb) => {
-    set({ selectedKB: kb })
+    // IMPORTANT: Write to localStorage FIRST before updating store
+    // This ensures the axios interceptor has the correct context when API calls are triggered
     if (kb) {
       localStorage.setItem('SELECTED_KB', JSON.stringify(kb))
+      console.log('[TenantStore] setSelectedKB - localStorage updated first:', kb.kb_id)
     } else {
       localStorage.removeItem('SELECTED_KB')
+      console.log('[TenantStore] setSelectedKB - localStorage cleared')
     }
+    // Then update the store (which may trigger effects that make API calls)
+    set({ selectedKB: kb })
   },
 
   setTenants: (tenants) => set({ tenants }),

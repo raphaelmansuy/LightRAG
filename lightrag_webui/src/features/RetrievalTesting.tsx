@@ -104,6 +104,7 @@ const parseCOTContent = (content: string) => {
 
 export default function RetrievalTesting() {
   const { t } = useTranslation()
+  const selectedTenant = useTenantState.use.selectedTenant()
   const selectedKB = useTenantState.use.selectedKB()
   const [messages, setMessages] = useState<MessageWithError[]>(() => {
     try {
@@ -612,6 +613,17 @@ export default function RetrievalTesting() {
       scrollToBottom()
     }
   }, [debouncedMessages, scrollToBottom])
+
+  // Clear retrieval history when tenant or KB changes to prevent showing stale data
+  useEffect(() => {
+    // Clear messages and retrieval history to ensure we don't show results from other tenants/KBs
+    setMessages([])
+    useSettingsStore.getState().setRetrievalHistory([])
+    console.log('[RetrievalTesting] Cleared retrieval history due to tenant/KB change:', {
+      tenant_id: selectedTenant?.tenant_id,
+      kb_id: selectedKB?.kb_id
+    })
+  }, [selectedTenant?.tenant_id, selectedKB?.kb_id])
 
 
   const clearMessages = useCallback(() => {

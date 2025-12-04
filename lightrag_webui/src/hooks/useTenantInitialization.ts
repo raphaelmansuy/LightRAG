@@ -10,7 +10,6 @@ import type { Tenant, KnowledgeBase } from '@/stores/tenant'
  * selecting the first available tenant and KB if none are currently selected
  */
 export function useTenantInitialization() {
-  const selectedTenant = useTenantState.use.selectedTenant()
   const selectedKB = useTenantState.use.selectedKB()
   const setSelectedTenant = useTenantState.use.setSelectedTenant()
   const setSelectedKB = useTenantState.use.setSelectedKB()

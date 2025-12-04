@@ -1147,6 +1147,62 @@ class RedisDocStatusStorage(DocStatusStorage):
                 logger.error(f"[{self.workspace}] Error in get_doc_by_file_path: {e}")
                 return None
 
+    async def get_doc_by_external_id(
+        self, external_id: str
+    ) -> Union[dict[str, Any], None]:
+        """Get document by external ID for idempotency checks.
+
+        Args:
+            external_id: The external ID to search for (client-provided unique identifier)
+
+        Returns:
+            Union[dict[str, Any], None]: Document data if found, None otherwise
+            Returns the same format as get_by_id method
+
+        Note:
+            This method scans all documents in the namespace since Redis doesn't
+            support secondary indexes. For high-volume workloads, consider using
+            a separate hash index or switching to PostgreSQL storage.
+        """
+        async with self._get_redis_connection() as redis:
+            try:
+                # Use SCAN to iterate through all keys in the namespace
+                prefix = self._get_key_prefix()
+                cursor = 0
+                while True:
+                    cursor, keys = await redis.scan(
+                        cursor, match=f"{prefix}:*", count=1000
+                    )
+                    if keys:
+                        # Get all values in batch
+                        pipe = redis.pipeline()
+                        for key in keys:
+                            pipe.get(key)
+                        values = await pipe.execute()
+
+                        # Check each document for matching external_id
+                        for value in values:
+                            if value:
+                                try:
+                                    doc_data = json.loads(value)
+                                    if doc_data.get("external_id") == external_id:
+                                        return doc_data
+                                except json.JSONDecodeError as e:
+                                    logger.error(
+                                        f"[{self.workspace}] JSON decode error in get_doc_by_external_id: {e}"
+                                    )
+                                    continue
+
+                    if cursor == 0:
+                        break
+
+                return None
+            except Exception as e:
+                logger.error(
+                    f"[{self.workspace}] Error in get_doc_by_external_id: {e}"
+                )
+                return None
+
     async def drop(self) -> dict[str, str]:
         """Drop all document status data from storage and clean up resources"""
         async with get_storage_lock():

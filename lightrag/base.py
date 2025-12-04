@@ -829,6 +829,34 @@ class DocStatusStorage(BaseKVStorage, ABC):
             Returns the same format as get_by_ids method
         """
 
+    async def get_doc_by_external_id(self, external_id: str) -> dict[str, Any] | None:
+        """Get document by external_id for idempotency support.
+        
+        This method searches for a document with the given external_id.
+        Default implementation scans all documents; storage backends should
+        override this with an optimized implementation using indexes.
+
+        Args:
+            external_id: The external unique identifier to search for
+
+        Returns:
+            dict[str, Any] | None: Document data if found, None otherwise
+            Returns the same format as get_by_ids method
+        """
+        # Default implementation - scan all documents
+        # Storage backends should override with optimized indexed lookup
+        try:
+            all_docs = await self.get_all()
+            if all_docs:
+                for doc_id, doc_data in all_docs.items():
+                    if isinstance(doc_data, dict):
+                        metadata = doc_data.get("metadata", {})
+                        if isinstance(metadata, dict) and metadata.get("external_id") == external_id:
+                            return {"id": doc_id, **doc_data}
+        except Exception:
+            pass
+        return None
+
 
 class StoragesStatus(str, Enum):
     """Storages status"""

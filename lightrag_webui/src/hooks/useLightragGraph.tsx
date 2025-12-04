@@ -517,10 +517,21 @@ const useLightrangeGraph = () => {
   // Reset fetch attempt when KB changes to trigger re-fetch
   useEffect(() => {
     const state = useGraphStore.getState()
+    
+    // Clear current graph immediately when KB changes
+    state.reset()
+    
+    // Reset all flags to allow new fetch
     state.setGraphDataFetchAttempted(false)
     state.setLabelsFetchAttempted(false)
-    // We don't necessarily want to reset the graph here, just allow a new fetch
-    // The fetch logic will handle clearing if needed
+    
+    // Reset refs to allow new fetch
+    dataLoadedRef.current = false
+    initialLoadRef.current = false
+    fetchInProgressRef.current = false
+    emptyDataHandledRef.current = false
+    
+    console.log('[useLightragGraph] KB changed, reset graph state')
   }, [selectedKB?.kb_id])
 
   // Graph data fetching logic

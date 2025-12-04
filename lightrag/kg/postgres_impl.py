@@ -1124,6 +1124,11 @@ class PostgreSQLDB:
                 "sql": "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_lightrag_doc_status_workspace_file_path ON LIGHTRAG_DOC_STATUS (workspace, file_path)",
                 "description": "Index for workspace + file_path sorting",
             },
+            {
+                "name": "idx_lightrag_doc_status_workspace_external_id",
+                "sql": "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_lightrag_doc_status_workspace_external_id ON LIGHTRAG_DOC_STATUS (workspace, (metadata->>'external_id')) WHERE metadata->>'external_id' IS NOT NULL",
+                "description": "Index for workspace + external_id for idempotency lookups",
+            },
         ]
 
         for index in indexes:
@@ -2476,6 +2481,62 @@ class PGDocStatusStorage(DocStatusStorage):
             updated_at = self._format_datetime_with_timezone(result[0]["updated_at"])
 
             return dict(
+                content_length=result[0]["content_length"],
+                content_summary=result[0]["content_summary"],
+                status=result[0]["status"],
+                chunks_count=result[0]["chunks_count"],
+                created_at=created_at,
+                updated_at=updated_at,
+                file_path=result[0]["file_path"],
+                chunks_list=chunks_list,
+                metadata=metadata,
+                error_msg=result[0].get("error_msg"),
+                track_id=result[0].get("track_id"),
+            )
+
+    async def get_doc_by_external_id(self, external_id: str) -> Union[dict[str, Any], None]:
+        """Get document by external_id for idempotency support.
+        
+        Uses indexed lookup on metadata->>'external_id' for efficient retrieval.
+
+        Args:
+            external_id: The external unique identifier to search for
+
+        Returns:
+            Union[dict[str, Any], None]: Document data if found, None otherwise
+        """
+        sql = """
+            SELECT * FROM LIGHTRAG_DOC_STATUS 
+            WHERE workspace=$1 AND metadata->>'external_id' = $2
+        """
+        params = {"workspace": self.workspace, "external_id": external_id}
+        result = await self.db.query(sql, list(params.values()), True)
+
+        if result is None or result == []:
+            return None
+        else:
+            # Parse chunks_list JSON string back to list
+            chunks_list = result[0].get("chunks_list", [])
+            if isinstance(chunks_list, str):
+                try:
+                    chunks_list = json.loads(chunks_list)
+                except json.JSONDecodeError:
+                    chunks_list = []
+
+            # Parse metadata JSON string back to dict
+            metadata = result[0].get("metadata", {})
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except json.JSONDecodeError:
+                    metadata = {}
+
+            # Convert datetime objects to ISO format strings with timezone info
+            created_at = self._format_datetime_with_timezone(result[0]["created_at"])
+            updated_at = self._format_datetime_with_timezone(result[0]["updated_at"])
+
+            return dict(
+                id=result[0]["id"],
                 content_length=result[0]["content_length"],
                 content_summary=result[0]["content_summary"],
                 status=result[0]["status"],

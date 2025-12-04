@@ -241,6 +241,70 @@ VITE_API_BASE_URL=http://localhost:9621 bun run dev
 | Uses root .env | ✅ Yes | ❌ Uses starter/.env | ❌ Hardcoded |
 | Easy debugging | ✅ Yes | ❌ Harder | ✅ Yes |
 
+## 🔀 Multi-Tenant Development & Testing
+
+LightRAG supports multi-tenant operation with workspace isolation. Here's how to test the multi-tenant features:
+
+### Running Multi-Tenant Tests
+
+```bash
+# Run the isolation test suite
+./e2e/run_isolation_test.sh
+
+# Run specific multi-tenant tests
+python -m pytest tests/test_idempotency.py -v
+python -m pytest e2e/test_multitenant_isolation.py -v
+```
+
+### Testing Tenant State Management
+
+The WebUI includes state management features for multi-tenant UX:
+
+1. **URL State Sync**: Navigate to documents with URL parameters:
+   ```
+   http://localhost:5173/documents#page=2&filter=processed
+   ```
+
+2. **Session Persistence**: Tenant selection persists in session storage
+   - Switch between tenants without losing document page state
+   - "Last selected" hint shows on tenant selection page
+
+3. **Cross-Tab Sync**: Changes propagate across browser tabs via storage events
+
+### Testing Idempotent Document Ingestion
+
+```bash
+# Test with curl - first insertion
+curl -X POST "http://localhost:9621/documents/text" \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-ID: test-tenant" \
+  -H "X-KB-ID: kb-1" \
+  -H "Authorization: Bearer your-token" \
+  -d '{
+    "text": "Document content here",
+    "external_id": "doc-unique-id-123"
+  }'
+
+# Second insertion with same external_id returns existing document (no duplicate)
+curl -X POST "http://localhost:9621/documents/text" \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-ID: test-tenant" \
+  -H "X-KB-ID: kb-1" \
+  -H "Authorization: Bearer your-token" \
+  -d '{
+    "text": "Different content - will be ignored",
+    "external_id": "doc-unique-id-123"
+  }'
+```
+
+### Multi-Tenant Architecture
+
+See [Multi-Tenant UX Documentation](./0004-multi-tenant-ux-state-management.md) for:
+- State management architecture
+- URL synchronization patterns
+- Idempotency implementation details
+- API examples
+
 ## 📝 Notes
 
 - Log files are stored in `/tmp/lightrag-dev-*.log`

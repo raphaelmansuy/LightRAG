@@ -75,22 +75,20 @@ axiosInstance.interceptors.request.use((config) => {
   
   let hasTenantContext = false;
   let hasKBContext = false;
+  let tenantId: string | null = null;
+  let kbId: string | null = null;
   
   if (selectedTenantJson) {
     try {
       const selectedTenant = JSON.parse(selectedTenantJson);
       if (selectedTenant?.tenant_id) {
         config.headers['X-Tenant-ID'] = selectedTenant.tenant_id;
+        tenantId = selectedTenant.tenant_id;
         hasTenantContext = true;
-        console.log('[Axios Interceptor] Added X-Tenant-ID header:', selectedTenant.tenant_id);
-      } else {
-        console.warn('[Axios Interceptor] Tenant in localStorage has no tenant_id:', selectedTenant);
       }
     } catch (e) {
       console.error('[Axios Interceptor] Failed to parse selected tenant from localStorage:', e);
     }
-  } else {
-    console.warn('[Axios Interceptor] No SELECTED_TENANT in localStorage');
   }
 
   if (selectedKBJson) {
@@ -98,16 +96,12 @@ axiosInstance.interceptors.request.use((config) => {
       const selectedKB = JSON.parse(selectedKBJson);
       if (selectedKB?.kb_id) {
         config.headers['X-KB-ID'] = selectedKB.kb_id;
+        kbId = selectedKB.kb_id;
         hasKBContext = true;
-        console.log('[Axios Interceptor] Added X-KB-ID header:', selectedKB.kb_id);
-      } else {
-        console.warn('[Axios Interceptor] KB in localStorage has no kb_id:', selectedKB);
       }
     } catch (e) {
       console.error('[Axios Interceptor] Failed to parse selected KB from localStorage:', e);
     }
-  } else {
-    console.log('[Axios Interceptor] No SELECTED_KB in localStorage (ok for some requests)');
   }
 
   // WUI-003 FIX: Block requests to tenant-required endpoints without proper context
@@ -115,8 +109,14 @@ axiosInstance.interceptors.request.use((config) => {
   
   if (requirement === 'kb') {
     if (!hasTenantContext || !hasKBContext) {
-      console.error('[Axios Interceptor] KB context required but missing for:', config.url);
-      throw new axios.Cancel('Please select a tenant and knowledge base before performing this action.');
+      const errorMsg = 'Please select a tenant and knowledge base before performing this action.';
+      console.error('[Axios Interceptor] KB context required but missing for:', config.url, {
+        hasTenant: hasTenantContext,
+        hasKB: hasKBContext,
+        tenantId,
+        kbId
+      });
+      throw new axios.Cancel(errorMsg);
     }
   } else if (requirement === 'tenant') {
     if (!hasTenantContext) {
@@ -125,13 +125,15 @@ axiosInstance.interceptors.request.use((config) => {
     }
   }
 
-  console.log('[Axios Interceptor] Request headers:', {
-    url: config.url,
-    method: config.method,
-    'X-Tenant-ID': config.headers['X-Tenant-ID'],
-    'X-KB-ID': config.headers['X-KB-ID'],
-    'Authorization': config.headers['Authorization'] ? 'EXISTS' : 'MISSING'
-  });
+  // Only log for non-exempt endpoints to reduce noise
+  if (requirement !== 'none') {
+    console.log('[Axios Interceptor] Request with context:', {
+      url: config.url,
+      method: config.method,
+      tenantId,
+      kbId
+    });
+  }
 
   return config
 })

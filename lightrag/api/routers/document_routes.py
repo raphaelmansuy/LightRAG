@@ -143,6 +143,9 @@ class InsertTextRequest(BaseModel):
     Attributes:
         text: The text content to be inserted into the RAG system
         file_source: Source of the text (optional)
+        external_id: External unique identifier for idempotency (optional).
+                     If provided, re-submitting the same external_id will return
+                     the existing document instead of creating a duplicate.
     """
 
     text: str = Field(
@@ -150,6 +153,12 @@ class InsertTextRequest(BaseModel):
         description="The text to insert",
     )
     file_source: str = Field(default=None, min_length=0, description="File Source")
+    external_id: str = Field(
+        default=None,
+        min_length=0,
+        max_length=255,
+        description="External unique identifier for idempotency. If provided and a document with this external_id already exists, the existing document will be returned instead of creating a duplicate.",
+    )
 
     @field_validator("text", mode="after")
     @classmethod
@@ -159,13 +168,19 @@ class InsertTextRequest(BaseModel):
     @field_validator("file_source", mode="after")
     @classmethod
     def strip_source_after(cls, file_source: str) -> str:
-        return file_source.strip()
+        return file_source.strip() if file_source else file_source
+    
+    @field_validator("external_id", mode="after")
+    @classmethod
+    def strip_external_id_after(cls, external_id: str) -> str:
+        return external_id.strip() if external_id else external_id
 
     class Config:
         json_schema_extra = {
             "example": {
                 "text": "This is a sample text to be inserted into the RAG system.",
                 "file_source": "Source of the text (optional)",
+                "external_id": "unique-doc-id-123",
             }
         }
 
@@ -176,6 +191,9 @@ class InsertTextsRequest(BaseModel):
     Attributes:
         texts: List of text contents to be inserted into the RAG system
         file_sources: Sources of the texts (optional)
+        external_ids: List of external unique identifiers for idempotency (optional).
+                      If provided, re-submitting the same external_id will skip that 
+                      document instead of creating a duplicate.
     """
 
     texts: list[str] = Field(
@@ -184,6 +202,10 @@ class InsertTextsRequest(BaseModel):
     )
     file_sources: list[str] = Field(
         default=None, min_length=0, description="Sources of the texts"
+    )
+    external_ids: list[str] = Field(
+        default=None,
+        description="List of external unique identifiers for idempotency. If a document with the same external_id already exists, it will be skipped.",
     )
 
     @field_validator("texts", mode="after")
@@ -194,7 +216,16 @@ class InsertTextsRequest(BaseModel):
     @field_validator("file_sources", mode="after")
     @classmethod
     def strip_sources_after(cls, file_sources: list[str]) -> list[str]:
+        if file_sources is None:
+            return None
         return [file_source.strip() for file_source in file_sources]
+    
+    @field_validator("external_ids", mode="after")
+    @classmethod
+    def strip_external_ids_after(cls, external_ids: list[str]) -> list[str]:
+        if external_ids is None:
+            return None
+        return [ext_id.strip() if ext_id else ext_id for ext_id in external_ids]
 
     class Config:
         json_schema_extra = {
@@ -205,6 +236,10 @@ class InsertTextsRequest(BaseModel):
                 ],
                 "file_sources": [
                     "First file source (optional)",
+                ],
+                "external_ids": [
+                    "unique-doc-1",
+                    "unique-doc-2",
                 ],
             }
         }
@@ -1833,6 +1868,10 @@ def create_document_routes(
 
         This endpoint allows you to insert text data into the RAG system for later retrieval
         and use in generating responses within the selected tenant and knowledge base.
+        
+        Idempotency: If `external_id` is provided and a document with this ID already exists,
+        the existing document will be returned instead of creating a duplicate. This ensures
+        safe retry behavior for document ingestion.
 
         Args:
             request (InsertTextRequest): The request body containing the text to be inserted.
@@ -1846,6 +1885,21 @@ def create_document_routes(
             HTTPException: If an error occurs during text processing (500).
         """
         try:
+            # Check for idempotency using external_id if provided
+            if request.external_id and request.external_id.strip():
+                existing_doc = await tenant_rag.doc_status.get_doc_by_external_id(
+                    request.external_id
+                )
+                if existing_doc:
+                    status = existing_doc.get("status", "unknown")
+                    doc_id = existing_doc.get("id", "")
+                    logger.info(f"Idempotent request: external_id '{request.external_id}' already exists with doc_id '{doc_id}'")
+                    return InsertResponse(
+                        status="duplicated",
+                        message=f"Document with external_id '{request.external_id}' already exists (Status: {status}, Doc ID: {doc_id}).",
+                        track_id=existing_doc.get("track_id", ""),
+                    )
+            
             # Check if file_source already exists in doc_status storage
             if (
                 request.file_source
@@ -1873,6 +1927,7 @@ def create_document_routes(
                 [request.text],
                 file_sources=[request.file_source],
                 track_id=track_id,
+                external_ids=[request.external_id] if request.external_id else None,
             )
 
             return InsertResponse(

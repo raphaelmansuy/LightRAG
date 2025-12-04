@@ -376,6 +376,28 @@ class JsonDocStatusStorage(DocStatusStorage):
 
         return None
 
+    async def get_doc_by_external_id(
+        self, external_id: str
+    ) -> Union[dict[str, Any], None]:
+        """Get document by external ID for idempotency checks.
+
+        Args:
+            external_id: The external ID to search for (client-provided unique identifier)
+
+        Returns:
+            Union[dict[str, Any], None]: Document data if found, None otherwise
+            Returns the same format as get_by_id method
+        """
+        if self._storage_lock is None:
+            raise StorageNotInitializedError("JsonDocStatusStorage")
+
+        async with self._storage_lock:
+            for doc_id, doc_data in self._data.items():
+                if doc_data.get("external_id") == external_id:
+                    return doc_data
+
+        return None
+
     async def drop(self) -> dict[str, str]:
         """Drop all document status data from storage and clean up resources
 

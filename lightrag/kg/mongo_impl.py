@@ -583,6 +583,8 @@ class MongoDocStatusStorage(DocStatusStorage):
                 {"name": f"{workspace_prefix}created_at", "keys": [("created_at", -1)]},
                 {"name": f"{workspace_prefix}id", "keys": [("_id", 1)]},
                 {"name": f"{workspace_prefix}track_id", "keys": [("track_id", 1)]},
+                # External ID index for idempotent ingestion
+                {"name": f"{workspace_prefix}external_id", "keys": [("external_id", 1)]},
                 # New file_path indexes with Chinese collation and workspace-specific names
                 {
                     "name": f"{workspace_prefix}file_path_zh_collation",
@@ -787,6 +789,24 @@ class MongoDocStatusStorage(DocStatusStorage):
             Returns the same format as get_by_id method
         """
         query = {"file_path": file_path}
+        tenant_id = get_current_tenant_id()
+        if tenant_id:
+            query["tenant_id"] = tenant_id
+        return await self._data.find_one(query)
+
+    async def get_doc_by_external_id(
+        self, external_id: str
+    ) -> Union[dict[str, Any], None]:
+        """Get document by external ID for idempotency checks.
+
+        Args:
+            external_id: The external ID to search for (client-provided unique identifier)
+
+        Returns:
+            Union[dict[str, Any], None]: Document data if found, None otherwise
+            Returns the same format as get_by_id method
+        """
+        query = {"external_id": external_id}
         tenant_id = get_current_tenant_id()
         if tenant_id:
             query["tenant_id"] = tenant_id

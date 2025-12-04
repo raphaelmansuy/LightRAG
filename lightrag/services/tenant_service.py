@@ -614,22 +614,57 @@ class TenantService:
             if hasattr(self.kv_storage, 'db') and self.kv_storage.db is not None:
                 try:
                     logger.debug("Attempting to query tenants from PostgreSQL database")
-                    # Query the tenants table directly
+                    # Query tenants with computed statistics using LEFT JOINs
+                    # This ensures we get real kb_count, total_documents, and storage from the database
+                    # Note: Documents are stored in lightrag_doc_full with workspace={tenant_id}:{kb_id}
+                    stats_query = """
+                        SELECT 
+                            t.tenant_id, 
+                            t.name, 
+                            t.description, 
+                            t.created_at, 
+                            t.updated_at,
+                            COALESCE(kb_stats.kb_count, 0) as kb_count,
+                            COALESCE(doc_stats.doc_count, 0) as total_documents,
+                            COALESCE(doc_stats.total_size_bytes, 0) as total_size_bytes
+                        FROM tenants t
+                        LEFT JOIN (
+                            SELECT tenant_id, COUNT(*) as kb_count 
+                            FROM knowledge_bases 
+                            GROUP BY tenant_id
+                        ) kb_stats ON t.tenant_id = kb_stats.tenant_id
+                        LEFT JOIN (
+                            SELECT 
+                                SPLIT_PART(workspace, ':', 1) as tenant_id,
+                                COUNT(*) as doc_count, 
+                                COALESCE(SUM(LENGTH(content)), 0) as total_size_bytes
+                            FROM lightrag_doc_full 
+                            GROUP BY SPLIT_PART(workspace, ':', 1)
+                        ) doc_stats ON t.tenant_id = doc_stats.tenant_id
+                        ORDER BY t.created_at DESC
+                    """
                     rows = await self.kv_storage.db.query(
-                        "SELECT tenant_id, name, description, created_at, updated_at FROM tenants ORDER BY created_at DESC",
+                        stats_query,
                         multirows=True
                     )
                     
                     if rows:
                         for row in rows:
                             try:
-                                # Create a Tenant object from the database row
+                                # Convert bytes to MB for storage
+                                total_size_bytes = row.get('total_size_bytes', 0) or 0
+                                total_storage_mb = total_size_bytes / (1024 * 1024)
+                                
+                                # Create a Tenant object from the database row with computed statistics
                                 tenant = Tenant(
                                     tenant_id=row['tenant_id'],
                                     tenant_name=row['name'],
                                     description=row.get('description', ''),
                                     created_by=None,  # Not tracked in basic schema
                                     metadata={},
+                                    kb_count=row.get('kb_count', 0) or 0,
+                                    total_documents=row.get('total_documents', 0) or 0,
+                                    total_storage_mb=total_storage_mb,
                                 )
                                 # Override timestamps from database
                                 if 'created_at' in row:
