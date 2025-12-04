@@ -12,12 +12,16 @@ This script validates that:
 Requires:
 - OPENAI_API_KEY environment variable set
 - LLM_MODEL set to gpt-5-nano or specified via argument
+
+Run standalone: python test_gpt5_nano_compatibility.py
+Run via pytest: pytest test_gpt5_nano_compatibility.py -v (some tests skipped without API key)
 """
 
 import os
 import sys
 import asyncio
 import logging
+import pytest
 from typing import Any, Dict
 
 # Setup logging
@@ -37,6 +41,14 @@ from lightrag.llm.openai import (
 )
 
 
+# Define markers for different test types
+NEEDS_API_KEY = pytest.mark.skipif(
+    not os.getenv("OPENAI_API_KEY") and not os.getenv("LLM_BINDING_API_KEY"),
+    reason="OPENAI_API_KEY or LLM_BINDING_API_KEY not set"
+)
+
+
+@pytest.mark.asyncio
 async def test_parameter_normalization():
     """Test 1: Parameter normalization for gpt-5-nano"""
     logger.info("=" * 60)
@@ -101,6 +113,8 @@ async def test_parameter_normalization():
         return False
 
 
+@pytest.mark.asyncio
+@NEEDS_API_KEY
 async def test_embeddings():
     """Test 2: Embeddings generation"""
     logger.info("=" * 60)
@@ -129,6 +143,8 @@ async def test_embeddings():
         return False
 
 
+@pytest.mark.asyncio
+@pytest.mark.skipif(not os.getenv("OPENAI_API_KEY"), reason="OPENAI_API_KEY not set")
 async def test_simple_completion():
     """Test 3: Simple LLM completion with gpt-5-nano"""
     logger.info("=" * 60)
@@ -164,6 +180,8 @@ async def test_simple_completion():
         return False
 
 
+@pytest.mark.asyncio
+@pytest.mark.skipif(not os.getenv("OPENAI_API_KEY"), reason="OPENAI_API_KEY not set")
 async def test_extraction_with_gpt5nano():
     """Test 4: Entity extraction style task"""
     logger.info("=" * 60)
@@ -201,12 +219,13 @@ Return as JSON with keys: company, person, year."""
         return False
 
 
+@pytest.mark.asyncio
 async def test_config_loading():
     """Test 5: Configuration loading from .env"""
     logger.info("=" * 60)
     logger.info("TEST 5: Configuration loading from .env")
     logger.info("=" * 60)
-    
+
     llm_model = os.getenv("LLM_MODEL", "not-set")
     llm_binding = os.getenv("LLM_BINDING", "not-set")
     embedding_model = os.getenv("EMBEDDING_MODEL", "not-set")
@@ -227,8 +246,8 @@ async def test_config_loading():
     return True
 
 
-async def run_all_tests():
-    """Run all tests"""
+async def _run_all_tests():
+    """Run all tests (internal helper, not picked up by pytest)"""
     logger.info("\n" + "=" * 60)
     logger.info("GPT-5-NANO COMPATIBILITY TEST SUITE")
     logger.info("=" * 60 + "\n")
@@ -276,5 +295,5 @@ if __name__ == "__main__":
     load_dotenv(dotenv_path=".env", override=False)
     
     # Run tests
-    success = asyncio.run(run_all_tests())
+    success = asyncio.run(_run_all_tests())
     sys.exit(0 if success else 1)

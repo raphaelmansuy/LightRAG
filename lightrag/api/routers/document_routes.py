@@ -1394,6 +1394,7 @@ async def pipeline_index_texts(
     texts: List[str],
     file_sources: List[str] = None,
     track_id: str = None,
+    external_ids: List[str] = None,
 ):
     """Index a list of texts with track_id
 
@@ -1412,7 +1413,7 @@ async def pipeline_index_texts(
                 for _ in range(len(file_sources), len(texts))
             ]
     await rag.apipeline_enqueue_documents(
-        input=texts, file_paths=file_sources, track_id=track_id
+        input=texts, file_paths=file_sources, track_id=track_id, external_ids=external_ids
     )
     await rag.apipeline_process_enqueue_documents()
 
@@ -1703,6 +1704,9 @@ async def background_delete_documents(
 def create_document_routes(
     rag: LightRAG, doc_manager: DocumentManager, api_key: Optional[str] = None, rag_manager: Optional[TenantRAGManager] = None
 ):
+    # Create a fresh APIRouter for each call so callers can mount isolated routers
+    # (important for tests which instantiate multiple apps in the same process)
+    router = APIRouter(prefix="/documents", tags=["documents"])
     # Create combined auth dependency for document routes
     combined_auth = get_combined_auth_dependency(api_key)
     
@@ -1995,6 +1999,7 @@ def create_document_routes(
                 request.texts,
                 file_sources=request.file_sources,
                 track_id=track_id,
+                external_ids=request.external_ids,
             )
 
             return InsertResponse(

@@ -22,7 +22,7 @@ from fastapi import FastAPI, Depends
 from lightrag.models.tenant import TenantContext, Role
 from lightrag.base import DocProcessingStatus, DocStatus
 from lightrag.api.dependencies import get_tenant_context
-from lightrag.api.routers.document_routes import router as document_router
+from lightrag.api.routers.document_routes import create_document_routes
 from lightrag.lightrag import LightRAG
 
 
@@ -37,7 +37,7 @@ def tenant_context_a():
         tenant_id="tenant-a",
         kb_id="kb-a-1",
         user_id="user-a-123",
-        user_role=Role.ADMIN
+        role=Role.ADMIN
     )
 
 
@@ -48,7 +48,7 @@ def tenant_context_b():
         tenant_id="tenant-b",
         kb_id="kb-b-1",
         user_id="user-b-456",
-        user_role=Role.ADMIN
+        role=Role.ADMIN
     )
 
 
@@ -80,24 +80,24 @@ def mock_rag_instances():
     rag_a.doc_status.get_doc_by_file_path = AsyncMock(return_value=None)
     rag_a.get_docs_by_status = AsyncMock(return_value={
         "doc-a-1": DocProcessingStatus(
-            id="doc-a-1",
-            status=DocStatus.PROCESSED,
             content_summary="Sample doc in Tenant A",
             content_length=100,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
-            track_id="track-a-1"
+            file_path="doc-a-1",
+            status=DocStatus.PROCESSED,
+            created_at=datetime.utcnow().isoformat(),
+            updated_at=datetime.utcnow().isoformat(),
+            track_id="track-a-1",
         )
     })
     rag_a.aget_docs_by_track_id = AsyncMock(return_value={
         "doc-a-1": DocProcessingStatus(
-            id="doc-a-1",
-            status=DocStatus.PROCESSED,
             content_summary="Sample doc in Tenant A",
             content_length=100,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
-            track_id="track-a-1"
+            file_path="doc-a-1",
+            status=DocStatus.PROCESSED,
+            created_at=datetime.utcnow().isoformat(),
+            updated_at=datetime.utcnow().isoformat(),
+            track_id="track-a-1",
         )
     })
     
@@ -106,24 +106,24 @@ def mock_rag_instances():
     rag_b.doc_status.get_doc_by_file_path = AsyncMock(return_value=None)
     rag_b.get_docs_by_status = AsyncMock(return_value={
         "doc-b-1": DocProcessingStatus(
-            id="doc-b-1",
-            status=DocStatus.PROCESSED,
             content_summary="Sample doc in Tenant B",
             content_length=200,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
-            track_id="track-b-1"
+            file_path="doc-b-1",
+            status=DocStatus.PROCESSED,
+            created_at=datetime.utcnow().isoformat(),
+            updated_at=datetime.utcnow().isoformat(),
+            track_id="track-b-1",
         )
     })
     rag_b.aget_docs_by_track_id = AsyncMock(return_value={
         "doc-b-1": DocProcessingStatus(
-            id="doc-b-1",
-            status=DocStatus.PROCESSED,
             content_summary="Sample doc in Tenant B",
             content_length=200,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
-            track_id="track-b-1"
+            file_path="doc-b-1",
+            status=DocStatus.PROCESSED,
+            created_at=datetime.utcnow().isoformat(),
+            updated_at=datetime.utcnow().isoformat(),
+            track_id="track-b-1",
         )
     })
     
@@ -134,9 +134,25 @@ def mock_rag_instances():
 def app_with_document_routes(mock_rag_instances):
     """Create FastAPI app with document routes and mocked dependencies."""
     app = FastAPI()
-    
-    # Include document router
-    app.include_router(document_router, prefix="/api/documents", tags=["documents"])
+
+    # Build router with a custom rag_manager so tests can provide mock rag instances
+    # Create a tiny rag_manager that returns the correct mock for a tenant id
+    class DummyRagManager:
+        def __init__(self, mapping):
+            self.mapping = mapping
+
+        async def get_rag_instance(self, tenant_id, kb_id, user_id=None):
+            return self.mapping.get(tenant_id)
+
+    dummy_rag = AsyncMock(spec=LightRAG)
+    dummy_doc_manager = AsyncMock()
+    rag_manager = DummyRagManager(mock_rag_instances)
+
+    # Create and include a router instance pointing to our rag_manager
+    doc_router = create_document_routes(dummy_rag, dummy_doc_manager, rag_manager=rag_manager)
+    # The document router already defines prefix="/documents" internally.
+    # Mount it under "/api" so final paths become "/api/documents/...".
+    app.include_router(doc_router, prefix="/api", tags=["documents"])
     
     # Track the current tenant context
     current_context = {"context": None, "rag": None}
@@ -145,14 +161,21 @@ def app_with_document_routes(mock_rag_instances):
     async def mock_get_tenant_context(*args, **kwargs):
         return current_context["context"]
     
-    # Mock get_tenant_rag that returns the appropriate RAG instance
-    async def mock_get_tenant_rag(*args, **kwargs):
-        tenant_id = current_context["context"].tenant_id
-        return mock_rag_instances.get(tenant_id)
-    
     # Override dependencies
-    app.dependency_overrides[get_tenant_context] = mock_get_tenant_context
-    app.dependency_overrides[get_tenant_rag] = mock_get_tenant_rag
+    # The router uses get_tenant_context_optional in its internal dependency chain
+    # so override both get_tenant_context and get_tenant_context_optional to ensure
+    # tenant context is injected in tests (strict multi-tenant mode requires it).
+    from lightrag.api.dependencies import get_tenant_context as _gtc
+    from lightrag.api.dependencies import get_tenant_context_optional as _gtco
+
+    app.dependency_overrides[_gtc] = mock_get_tenant_context
+    app.dependency_overrides[_gtco] = mock_get_tenant_context
+
+    # For testing route logic we don't want auth to interfere. Disable global auth checks
+    # by toggling the module-level flag in utils_api. This mirrors the behavior in
+    # many test fixtures where authentication is mocked out.
+    import lightrag.api.utils_api as utils_api
+    utils_api.auth_configured = False
     
     # Store context setter for tests
     app._set_context = lambda ctx: current_context.update({"context": ctx})
@@ -178,7 +201,7 @@ class TestDocumentRoutesUseTenantRAG:
         app_with_document_routes._set_context(tenant_context_a)
         
         response = client.post(
-            "/api/documents/text",
+            "/api/documents/text?args=1&kwargs=1",
             json={
                 "text": "This is a test document",
                 "file_source": "test_file.txt"
@@ -186,6 +209,9 @@ class TestDocumentRoutesUseTenantRAG:
         )
         
         # Verify that the request was processed
+        if response.status_code == 422:
+            # Debugging info: show validation errors
+            print("RESPONSE 422 BODY:", response.json())
         assert response.status_code in [200, 400, 500], f"Unexpected status code: {response.status_code}"
         
         # Verify that tenant A's RAG was queried for doc status
@@ -196,7 +222,7 @@ class TestDocumentRoutesUseTenantRAG:
         app_with_document_routes._set_context(tenant_context_a)
         
         response = client.post(
-            "/api/documents/texts",
+            "/api/documents/texts?args=1&kwargs=1",
             json={
                 "texts": ["Document 1", "Document 2"],
                 "file_sources": ["doc1.txt", "doc2.txt"]
@@ -204,6 +230,8 @@ class TestDocumentRoutesUseTenantRAG:
         )
         
         # Verify that the request was processed
+        if response.status_code == 422:
+            print("RESPONSE 422 BODY:", response.json())
         assert response.status_code in [200, 400, 500]
         
         # Verify that tenant A's RAG was queried for doc status
@@ -213,9 +241,11 @@ class TestDocumentRoutesUseTenantRAG:
         """Test that /documents GET endpoint uses tenant-specific RAG instance."""
         app_with_document_routes._set_context(tenant_context_a)
         
-        response = client.get("/api/documents")
+        response = client.get("/api/documents?args=1&kwargs=1")
         
         # Verify that the request was processed
+        if response.status_code == 422:
+            print("RESPONSE 422 BODY:", response.json())
         assert response.status_code == 200
         
         # Verify that tenant A's RAG was used to get docs by status
@@ -225,9 +255,11 @@ class TestDocumentRoutesUseTenantRAG:
         """Test that /track_status endpoint uses tenant-specific RAG instance."""
         app_with_document_routes._set_context(tenant_context_a)
         
-        response = client.get("/api/documents/track_status/track-a-1")
+        response = client.get("/api/documents/track_status/track-a-1?args=1&kwargs=1")
         
         # Verify that the request was processed
+        if response.status_code == 422:
+            print("RESPONSE 422 BODY:", response.json())
         assert response.status_code == 200
         
         # Verify that tenant A's RAG was used to get docs by track_id
@@ -241,11 +273,11 @@ class TestMultiTenantIsolation:
         """Verify that Tenant A's document queries don't return Tenant B's documents."""
         # Query as Tenant A
         app_with_document_routes._set_context(tenant_context_a)
-        response_a = client.get("/api/documents")
+        response_a = client.get("/api/documents?args=1&kwargs=1")
         
         # Query as Tenant B
         app_with_document_routes._set_context(tenant_context_b)
-        response_b = client.get("/api/documents")
+        response_b = client.get("/api/documents?args=1&kwargs=1")
         
         # Both should succeed
         assert response_a.status_code == 200
@@ -259,11 +291,11 @@ class TestMultiTenantIsolation:
         """Verify that track_status endpoint returns docs from the correct tenant only."""
         # Track status in Tenant A
         app_with_document_routes._set_context(tenant_context_a)
-        response_a = client.get("/api/documents/track_status/track-a-1")
+        response_a = client.get("/api/documents/track_status/track-a-1?args=1&kwargs=1")
         
         # Track status in Tenant B
         app_with_document_routes._set_context(tenant_context_b)
-        response_b = client.get("/api/documents/track_status/track-b-1")
+        response_b = client.get("/api/documents/track_status/track-b-1?args=1&kwargs=1")
         
         # Both should succeed
         assert response_a.status_code == 200
@@ -286,7 +318,7 @@ class TestDocumentEndpointFunctionality:
         mock_rag_instances["tenant-a"].doc_status.get_doc_by_file_path.return_value = existing_doc
         
         response = client.post(
-            "/api/documents/text",
+            "/api/documents/text?args=1&kwargs=1",
             json={
                 "text": "Duplicate content",
                 "file_source": "duplicate.txt"
@@ -303,7 +335,7 @@ class TestDocumentEndpointFunctionality:
         app_with_document_routes._set_context(tenant_context_a)
         
         response = client.post(
-            "/api/documents/texts",
+            "/api/documents/texts?args=1&kwargs=1",
             json={
                 "texts": ["Text 1", "Text 2", "Text 3"],
                 "file_sources": ["file1.txt", "file2.txt", "file3.txt"]

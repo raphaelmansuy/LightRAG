@@ -185,6 +185,9 @@ def create_tenant_routes(tenant_service: TenantService) -> APIRouter:
                 num_documents=tenant.total_documents,
                 storage_used_gb=tenant.total_storage_mb / 1024.0,
             )
+        except HTTPException:
+            # Let explicit HTTPExceptions (404 etc.) bubble up unchanged
+            raise
         except Exception as e:
             logger.error(f"Error getting current tenant {context.tenant_id}: {e}")
             raise HTTPException(

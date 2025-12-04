@@ -1025,6 +1025,7 @@ class LightRAG:
         ids: list[str] | None = None,
         file_paths: str | list[str] | None = None,
         track_id: str | None = None,
+        external_ids: list[str] | None = None,
     ) -> str:
         """
         Pipeline for Processing Documents
@@ -1065,6 +1066,31 @@ class LightRAG:
             # If no file paths provided, use placeholder
             file_paths = ["unknown_source"] * len(input)
 
+        # If external_ids provided, check idempotency before further processing
+        # We iterate in-order and skip any document whose external_id already exists in doc_status
+        indices_to_process = list(range(len(input)))
+        if external_ids is not None:
+            if isinstance(external_ids, str):
+                external_ids = [external_ids]
+            if len(external_ids) != len(input):
+                raise ValueError("Number of external_ids must match the number of documents")
+
+            # Call get_doc_by_external_id for each external_id and filter out existing documents
+            remaining_indices = []
+            for i, ext_id in enumerate(external_ids):
+                if ext_id and str(ext_id).strip():
+                    try:
+                        existing = await self.doc_status.get_doc_by_external_id(ext_id)
+                    except Exception:
+                        existing = None
+                    if existing:
+                        # Skip this index (idempotent: doc exists)
+                        logger.info(f"Skipping document with external_id {ext_id} since it already exists")
+                        continue
+                remaining_indices.append(i)
+
+            indices_to_process = remaining_indices
+
         # 1. Validate ids if provided or generate MD5 hash IDs and remove duplicate contents
         if ids is not None:
             # Check if the number of IDs matches the number of documents
@@ -1090,7 +1116,13 @@ class LightRAG:
         else:
             # Clean input text and remove duplicates in one pass
             unique_content_with_paths = {}
-            for doc, path in zip(input, file_paths):
+            # When ids isn't provided we compute md5 ids, but we only consider indices_to_process
+            for idx, (doc, path) in enumerate(zip(input, file_paths)):
+                if idx not in indices_to_process:
+                    continue
+                cleaned_content = sanitize_text_for_encoding(doc)
+                if cleaned_content not in unique_content_with_paths:
+                    unique_content_with_paths[cleaned_content] = path
                 cleaned_content = sanitize_text_for_encoding(doc)
                 if cleaned_content not in unique_content_with_paths:
                     unique_content_with_paths[cleaned_content] = path
@@ -1103,6 +1135,29 @@ class LightRAG:
                 }
                 for content, path in unique_content_with_paths.items()
             }
+
+        # If external_ids were provided, attach them to the corresponding new_docs (metadata)
+        external_map: dict[str, str] = {}
+        if external_ids is not None:
+            # Map external_ids to the computed doc ids in a best-effort manner using original indices
+            # We only have doc ids in 'contents' keys; we'll map in insertion order
+            # Build list of doc ids in same ordering of processed inputs
+            content_list = list(contents.items())
+            # Map by index in indices_to_process
+            try:
+                for idx, ext_id in zip(indices_to_process, external_ids):
+                    if ext_id and str(ext_id).strip():
+                        # Find the generated doc_id for this content
+                        # Need to compute cleaned content to find key
+                        cleaned = sanitize_text_for_encoding(input[idx])
+                        # find matching doc id
+                        for doc_id, data in contents.items():
+                            if data.get("content") == cleaned:
+                                external_map[doc_id] = ext_id
+                                break
+            except Exception:
+                # If anything goes wrong mapping external ids, ignore external map
+                external_map = {}
 
         # 2. Generate document initial status (without content)
         new_docs: dict[str, Any] = {
@@ -1161,6 +1216,14 @@ class LightRAG:
         await self.full_docs.index_done_callback()
 
         # Store document status (without content)
+        # Attach external_id metadata to status entries when available
+        if external_map:
+            for doc_id, ext_id in external_map.items():
+                if doc_id in new_docs:
+                    doc_metadata = new_docs[doc_id].get("metadata", {})
+                    doc_metadata["external_id"] = ext_id
+                    new_docs[doc_id]["metadata"] = doc_metadata
+
         await self.doc_status.upsert(new_docs)
         logger.debug(f"Stored {len(new_docs)} new unique documents")
 

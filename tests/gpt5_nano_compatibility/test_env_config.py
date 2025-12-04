@@ -14,6 +14,7 @@ import asyncio
 import json
 from pathlib import Path
 from dotenv import load_dotenv
+import pytest
 
 # Load environment variables from .env
 load_dotenv()
@@ -22,6 +23,7 @@ load_dotenv()
 # PART 1: Verify .env Configuration Loading
 # ============================================================================
 
+@pytest.mark.skipif(os.getenv("LLM_BINDING") != "openai", reason="LLM_BINDING not set to openai")
 def test_env_loading():
     """Verify that .env configuration is properly loaded."""
     print("\n" + "="*80)
@@ -67,6 +69,7 @@ def test_env_loading():
 # PART 2: Verify Configuration is Loaded by LightRAG Config Parser
 # ============================================================================
 
+@pytest.mark.skipif(os.getenv("LLM_BINDING") != "openai", reason="LLM_BINDING not set to openai")
 def test_config_parser():
     """Verify that the argparse config parser respects .env settings."""
     print("\n" + "="*80)
@@ -123,6 +126,8 @@ def test_config_parser():
 # PART 3: Test OpenAI API Connectivity
 # ============================================================================
 
+@pytest.mark.asyncio
+@pytest.mark.skipif(not os.getenv("LLM_BINDING_API_KEY"), reason="LLM_BINDING_API_KEY not set")
 async def test_openai_connectivity():
     """Test OpenAI API connectivity with configured API key."""
     print("\n" + "="*80)
@@ -160,6 +165,8 @@ async def test_openai_connectivity():
 # PART 4: Test Embeddings with Configured Model
 # ============================================================================
 
+@pytest.mark.asyncio
+@pytest.mark.skipif(not os.getenv("EMBEDDING_BINDING_API_KEY"), reason="EMBEDDING_BINDING_API_KEY not set")
 async def test_embeddings():
     """Test embeddings generation using configured model from .env."""
     print("\n" + "="*80)
@@ -212,6 +219,8 @@ async def test_embeddings():
 # PART 5: Test LLM Extraction with Configured Model
 # ============================================================================
 
+@pytest.mark.asyncio
+@pytest.mark.skipif(not os.getenv("LLM_BINDING_API_KEY"), reason="LLM_BINDING_API_KEY not set")
 async def test_llm_extraction():
     """Test LLM extraction using configured model from .env."""
     print("\n" + "="*80)
@@ -282,6 +291,9 @@ async def test_llm_extraction():
 # PART 6: Full Integration Test
 # ============================================================================
 
+@pytest.mark.asyncio
+@pytest.mark.skipif(not os.getenv("LLM_BINDING_API_KEY") or not os.getenv("EMBEDDING_BINDING_API_KEY"), 
+                    reason="LLM_BINDING_API_KEY or EMBEDDING_BINDING_API_KEY not set")
 async def test_full_integration():
     """Test full LightRAG pipeline with .env configuration."""
     print("\n" + "="*80)
@@ -354,8 +366,8 @@ async def test_full_integration():
 # Main Test Execution
 # ============================================================================
 
-async def main():
-    """Run all tests."""
+async def _main():
+    """Run all tests (internal helper)."""
     print("\n")
     print("╔" + "="*78 + "╗")
     print("║" + " "*15 + "TESTING .ENV OPENAI CONFIGURATION" + " "*31 + "║")
@@ -394,5 +406,5 @@ async def main():
         return False
 
 if __name__ == "__main__":
-    success = asyncio.run(main())
+    success = asyncio.run(_main())
     exit(0 if success else 1)
