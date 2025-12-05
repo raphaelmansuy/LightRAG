@@ -269,4 +269,4 @@ Tenant A          Tenant B          Tenant C
 
 *Built with ❤️ by [HKUDS](https://github.com/HKUDS)*
 
-*Multi-tenant feature contributed by [Raphaël MANSUY](https://www.elitizon.com/)*
+*Multi-tenant feature Build * 

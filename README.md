@@ -51,7 +51,7 @@
 
 ---
 ## 🎉 News
-- [2025.12]🎯[New Feature] **Enterprise Multi-Tenant Support** contributed by [Raphaël MANSUY](https://github.com/raphaelmansuy) ([ELITIZON](https://www.elitizon.com)): Complete tenant isolation with RBAC, per-tenant knowledge bases, and full backward compatibility for single-tenant deployments.
+- [2025.12]🎯[New Feature] **Enterprise Multi-Tenant Support**: Complete tenant isolation with RBAC, per-tenant knowledge bases, and full backward compatibility for single-tenant deployments.
 - [2025.11]🎯[New Feature]: Integrated **RAGAS for Evaluation** and **Langfuse for Tracing**. Updated the API to return retrieved contexts alongside query results to support context precision metrics.
 - [2025.10]🎯[Scalability Enhancement]: Eliminated processing bottlenecks to support **Large-Scale Datasets Efficiently**.
 - [2025.09]🎯[New Feature] Enhances knowledge graph extraction accuracy for **Open-Sourced LLMs** such as Qwen3-30B-A3B.
@@ -972,8 +972,6 @@ The `workspace` parameter ensures data isolation between different LightRAG inst
 To maintain compatibility with legacy data, the default workspace for PostgreSQL non-graph storage is `default` and, for PostgreSQL AGE graph storage is null, for Neo4j graph storage is `base` when no workspace is configured. For all external storages, the system provides dedicated workspace environment variables to override the common `WORKSPACE` environment variable configuration. These storage-specific workspace environment variables are: `REDIS_WORKSPACE`, `MILVUS_WORKSPACE`, `QDRANT_WORKSPACE`, `MONGODB_WORKSPACE`, `POSTGRES_WORKSPACE`, `NEO4J_WORKSPACE`.
 
 ### 🏢 Enterprise Multi-Tenant Mode
-
-> **Contributed by [Raphaël MANSUY](https://github.com/raphaelmansuy) ([ELITIZON](https://www.elitizon.com))**
 
 LightRAG supports enterprise-grade multi-tenancy with complete data isolation, role-based access control (RBAC), and per-tenant knowledge bases. This enables SaaS deployments where multiple organizations share the same infrastructure while maintaining strict data boundaries.
 

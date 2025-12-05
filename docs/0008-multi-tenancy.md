@@ -2,7 +2,7 @@
 
 > **🚀 Enterprise Feature** | Multi-tenancy is the first enterprise feature added to this fork of LightRAG.
 >
-> This feature was developed by [Raphaël MANSUY](https://www.elitizon.com/) as part of the enterprise-ready LightRAG initiative.
+This document describes the enterprise multi-tenancy features added to LightRAG.
 
 ## Multi-Tenancy Overview
 
@@ -655,4 +655,4 @@ asyncio.run(setup_multi_tenant())
 
 ---
 
-*Multi-tenancy feature developed by [Raphaël MANSUY](https://www.elitizon.com/) for LightRAG Enterprise Edition*
+*Multi-tenancy feature*

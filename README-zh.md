@@ -53,7 +53,7 @@
 
 ## 🎉 新闻
 
-- [x] [2025.12.01]🎯📢**企业级多租户支持**由 [Raphaël MANSUY](https://github.com/raphaelmansuy) ([ELITIZON](https://www.elitizon.com)) 贡献：完整的租户隔离、RBAC权限控制、每租户知识库，并完全向后兼容单租户部署。
+- [x] [2025.12.01]🎯📢**企业级多租户支持**：完整的租户隔离、RBAC权限控制、每租户知识库，并完全向后兼容单租户部署。
 - [x] [2025.11.05]🎯📢添加**基于RAGAS的**评估框架和**Langfuse**可观测性支持（API可随查询结果返回召回上下文）。
 - [x] [2025.10.22]🎯📢消除处理**大规模数据集**的性能瓶颈。
 - [x] [2025.09.15]🎯📢显著提升**小型LLM**（如Qwen3-30B-A3B）的知识图谱提取准确性。
@@ -925,7 +925,7 @@ maxclients 500
 
 ### 🏢 企业级多租户模式
 
-> **由 [Raphaël MANSUY](https://github.com/raphaelmansuy) ([ELITIZON](https://www.elitizon.com)) 贡献**
+
 
 LightRAG支持企业级多租户功能，提供完整的数据隔离、基于角色的访问控制(RBAC)和每租户知识库管理。这使得SaaS部署成为可能，多个组织可以共享同一基础设施，同时保持严格的数据边界。
 
