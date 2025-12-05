@@ -5,20 +5,22 @@ import re
 import datetime
 from datetime import timezone
 from dataclasses import dataclass, field
-from typing import Any, Union, final
+from typing import Any, Awaitable, Callable, TypeVar, Union, final
 import numpy as np
 import configparser
 import ssl
 import itertools
-import hashlib
 
 from lightrag.types import KnowledgeGraph, KnowledgeGraphNode, KnowledgeGraphEdge
 
 from tenacity import (
+    AsyncRetrying,
+    RetryCallState,
     retry,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
+    wait_fixed,
 )
 
 from ..base import (
@@ -31,9 +33,7 @@ from ..base import (
 )
 from ..namespace import NameSpace, is_namespace
 from ..utils import logger
-from ..constants import GRAPH_FIELD_SEP
-from ..kg.shared_storage import get_data_init_lock, get_graph_db_lock, get_storage_lock
-from ..utils_context import get_current_tenant_id
+from ..kg.shared_storage import get_data_init_lock
 
 import pipmaster as pm
 
@@ -49,6 +49,8 @@ from dotenv import load_dotenv
 # allows to use different .env file for each lightrag instance
 # the OS environment variables take precedence over the .env file
 load_dotenv(dotenv_path=".env", override=False)
+
+T = TypeVar("T")
 
 
 class PostgreSQLDB:
@@ -75,9 +77,50 @@ class PostgreSQLDB:
         self.hnsw_m = config.get("hnsw_m")
         self.hnsw_ef = config.get("hnsw_ef")
         self.ivfflat_lists = config.get("ivfflat_lists")
+        self.vchordrq_build_options = config.get("vchordrq_build_options")
+        self.vchordrq_probes = config.get("vchordrq_probes")
+        self.vchordrq_epsilon = config.get("vchordrq_epsilon")
+
+        # Server settings
+        self.server_settings = config.get("server_settings")
+
+        # Statement LRU cache size (keep as-is, allow None for optional configuration)
+        self.statement_cache_size = config.get("statement_cache_size")
 
         if self.user is None or self.password is None or self.database is None:
             raise ValueError("Missing database user, password, or database")
+
+        # Guard concurrent pool resets
+        self._pool_reconnect_lock = asyncio.Lock()
+
+        self._transient_exceptions = (
+            asyncio.TimeoutError,
+            TimeoutError,
+            ConnectionError,
+            OSError,
+            asyncpg.exceptions.InterfaceError,
+            asyncpg.exceptions.TooManyConnectionsError,
+            asyncpg.exceptions.CannotConnectNowError,
+            asyncpg.exceptions.PostgresConnectionError,
+            asyncpg.exceptions.ConnectionDoesNotExistError,
+            asyncpg.exceptions.ConnectionFailureError,
+        )
+
+        # Connection retry configuration
+        self.connection_retry_attempts = config["connection_retry_attempts"]
+        self.connection_retry_backoff = config["connection_retry_backoff"]
+        self.connection_retry_backoff_max = max(
+            self.connection_retry_backoff,
+            config["connection_retry_backoff_max"],
+        )
+        self.pool_close_timeout = config["pool_close_timeout"]
+        logger.info(
+            "PostgreSQL, Retry config: attempts=%s, backoff=%.1fs, backoff_max=%.1fs, pool_close_timeout=%.1fs",
+            self.connection_retry_attempts,
+            self.connection_retry_backoff,
+            self.connection_retry_backoff_max,
+            self.pool_close_timeout,
+        )
 
     def _create_ssl_context(self) -> ssl.SSLContext | None:
         """Create SSL context based on configuration parameters."""
@@ -150,36 +193,85 @@ class PostgreSQLDB:
         return None
 
     async def initdb(self):
+        # Prepare connection parameters
+        connection_params = {
+            "user": self.user,
+            "password": self.password,
+            "database": self.database,
+            "host": self.host,
+            "port": self.port,
+            "min_size": 1,
+            "max_size": self.max,
+        }
+
+        # Only add statement_cache_size if it's configured
+        if self.statement_cache_size is not None:
+            connection_params["statement_cache_size"] = int(self.statement_cache_size)
+            logger.info(
+                f"PostgreSQL, statement LRU cache size set as: {self.statement_cache_size}"
+            )
+
+        # Add SSL configuration if provided
+        ssl_context = self._create_ssl_context()
+        if ssl_context is not None:
+            connection_params["ssl"] = ssl_context
+            logger.info("PostgreSQL, SSL configuration applied")
+        elif self.ssl_mode:
+            # Handle simple SSL modes without custom context
+            if self.ssl_mode.lower() in ["require", "prefer"]:
+                connection_params["ssl"] = True
+            elif self.ssl_mode.lower() == "disable":
+                connection_params["ssl"] = False
+            logger.info(f"PostgreSQL, SSL mode set to: {self.ssl_mode}")
+
+        # Add server settings if provided
+        if self.server_settings:
+            try:
+                settings = {}
+                # The format is expected to be a query string, e.g., "key1=value1&key2=value2"
+                pairs = self.server_settings.split("&")
+                for pair in pairs:
+                    if "=" in pair:
+                        key, value = pair.split("=", 1)
+                        settings[key] = value
+                if settings:
+                    connection_params["server_settings"] = settings
+                    logger.info(f"PostgreSQL, Server settings applied: {settings}")
+            except Exception as e:
+                logger.warning(
+                    f"PostgreSQL, Failed to parse server_settings: {self.server_settings}, error: {e}"
+                )
+
+        wait_strategy = (
+            wait_exponential(
+                multiplier=self.connection_retry_backoff,
+                min=self.connection_retry_backoff,
+                max=self.connection_retry_backoff_max,
+            )
+            if self.connection_retry_backoff > 0
+            else wait_fixed(0)
+        )
+
+        async def _create_pool_once() -> None:
+            pool = await asyncpg.create_pool(**connection_params)  # type: ignore
+            try:
+                async with pool.acquire() as connection:
+                    await self.configure_vector_extension(connection)
+            except Exception:
+                await pool.close()
+                raise
+            self.pool = pool
+
         try:
-            # Prepare connection parameters
-            connection_params = {
-                "user": self.user,
-                "password": self.password,
-                "database": self.database,
-                "host": self.host,
-                "port": self.port,
-                "min_size": 1,
-                "max_size": self.max,
-            }
-
-            # Add SSL configuration if provided
-            ssl_context = self._create_ssl_context()
-            if ssl_context is not None:
-                connection_params["ssl"] = ssl_context
-                logger.info("PostgreSQL, SSL configuration applied")
-            elif self.ssl_mode:
-                # Handle simple SSL modes without custom context
-                if self.ssl_mode.lower() in ["require", "prefer"]:
-                    connection_params["ssl"] = True
-                elif self.ssl_mode.lower() == "disable":
-                    connection_params["ssl"] = False
-                logger.info(f"PostgreSQL, SSL mode set to: {self.ssl_mode}")
-
-            self.pool = await asyncpg.create_pool(**connection_params)  # type: ignore
-
-            # Ensure VECTOR extension is available
-            async with self.pool.acquire() as connection:
-                await self.configure_vector_extension(connection)
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(self.connection_retry_attempts),
+                retry=retry_if_exception_type(self._transient_exceptions),
+                wait=wait_strategy,
+                before_sleep=self._before_sleep,
+                reraise=True,
+            ):
+                with attempt:
+                    await _create_pool_once()
 
             ssl_status = "with SSL" if connection_params.get("ssl") else "without SSL"
             logger.info(
@@ -191,12 +283,98 @@ class PostgreSQLDB:
             )
             raise
 
+    async def _ensure_pool(self) -> None:
+        """Ensure the connection pool is initialised."""
+        if self.pool is None:
+            async with self._pool_reconnect_lock:
+                if self.pool is None:
+                    await self.initdb()
+
+    async def _reset_pool(self) -> None:
+        async with self._pool_reconnect_lock:
+            if self.pool is not None:
+                try:
+                    await asyncio.wait_for(
+                        self.pool.close(), timeout=self.pool_close_timeout
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "PostgreSQL, Timed out closing connection pool after %.2fs",
+                        self.pool_close_timeout,
+                    )
+                except Exception as close_error:  # pragma: no cover - defensive logging
+                    logger.warning(
+                        f"PostgreSQL, Failed to close existing connection pool cleanly: {close_error!r}"
+                    )
+            self.pool = None
+
+    async def _before_sleep(self, retry_state: RetryCallState) -> None:
+        """Hook invoked by tenacity before sleeping between retries."""
+        exc = retry_state.outcome.exception() if retry_state.outcome else None
+        logger.warning(
+            "PostgreSQL transient connection issue on attempt %s/%s: %r",
+            retry_state.attempt_number,
+            self.connection_retry_attempts,
+            exc,
+        )
+        await self._reset_pool()
+
+    async def _run_with_retry(
+        self,
+        operation: Callable[[asyncpg.Connection], Awaitable[T]],
+        *,
+        with_age: bool = False,
+        graph_name: str | None = None,
+    ) -> T:
+        """
+        Execute a database operation with automatic retry for transient failures.
+
+        Args:
+            operation: Async callable that receives an active connection.
+            with_age: Whether to configure Apache AGE on the connection.
+            graph_name: AGE graph name; required when with_age is True.
+
+        Returns:
+            The result returned by the operation.
+
+        Raises:
+            Exception: Propagates the last error if all retry attempts fail or a non-transient error occurs.
+        """
+        wait_strategy = (
+            wait_exponential(
+                multiplier=self.connection_retry_backoff,
+                min=self.connection_retry_backoff,
+                max=self.connection_retry_backoff_max,
+            )
+            if self.connection_retry_backoff > 0
+            else wait_fixed(0)
+        )
+
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(self.connection_retry_attempts),
+            retry=retry_if_exception_type(self._transient_exceptions),
+            wait=wait_strategy,
+            before_sleep=self._before_sleep,
+            reraise=True,
+        ):
+            with attempt:
+                await self._ensure_pool()
+                assert self.pool is not None
+                async with self.pool.acquire() as connection:  # type: ignore[arg-type]
+                    if with_age and graph_name:
+                        await self.configure_age(connection, graph_name)
+                    elif with_age and not graph_name:
+                        raise ValueError("Graph name is required when with_age is True")
+                    if self.vector_index_type == "VCHORDRQ":
+                        await self.configure_vchordrq(connection)
+                    return await operation(connection)
+
     @staticmethod
     async def configure_vector_extension(connection: asyncpg.Connection) -> None:
         """Create VECTOR extension if it doesn't exist for vector similarity operations."""
         try:
             await connection.execute("CREATE EXTENSION IF NOT EXISTS vector")  # type: ignore
-            logger.info("VECTOR extension ensured for PostgreSQL")
+            logger.info("PostgreSQL, VECTOR extension enabled")
         except Exception as e:
             logger.warning(f"Could not create VECTOR extension: {e}")
             # Don't raise - let the system continue without vector extension
@@ -205,8 +383,8 @@ class PostgreSQLDB:
     async def configure_age_extension(connection: asyncpg.Connection) -> None:
         """Create AGE extension if it doesn't exist for graph operations."""
         try:
-            await connection.execute("CREATE EXTENSION IF NOT EXISTS age")  # type: ignore
-            logger.info("AGE extension ensured for PostgreSQL")
+            await connection.execute("CREATE EXTENSION IF NOT EXISTS AGE CASCADE")  # type: ignore
+            logger.info("PostgreSQL, AGE extension enabled")
         except Exception as e:
             logger.warning(f"Could not create AGE extension: {e}")
             # Don't raise - let the system continue without AGE extension
@@ -216,40 +394,46 @@ class PostgreSQLDB:
         """Set the Apache AGE environment and creates a graph if it does not exist.
 
         This method:
-        - Loads the AGE extension into the current session (required for Cypher functions).
         - Sets the PostgreSQL `search_path` to include `ag_catalog`, ensuring that Apache AGE functions can be used without specifying the schema.
         - Attempts to create a new graph with the provided `graph_name` if it does not already exist.
         - Silently ignores errors related to the graph already existing.
 
         """
         try:
-            # Load AGE extension - required for Cypher functions to work
-            await connection.execute("LOAD 'age'")  # type: ignore
             await connection.execute(  # type: ignore
                 'SET search_path = ag_catalog, "$user", public'
             )
-            
-            # Check if graph exists first to avoid error logs
-            exists = await connection.fetchval(
-                "SELECT count(*) FROM ag_catalog.ag_graph WHERE name = $1", graph_name
+            await connection.execute(  # type: ignore
+                f"select create_graph('{graph_name}')"
             )
-            
-            if exists == 0:
-                await connection.execute(  # type: ignore
-                    f"select create_graph('{graph_name}')"
-                )
         except (
             asyncpg.exceptions.InvalidSchemaNameError,
             asyncpg.exceptions.UniqueViolationError,
-            asyncpg.exceptions.DuplicateObjectError,  # Graph already exists
         ):
             pass
-        except Exception as e:
-            # Handle "already exists" error message for AGE graphs
-            if "already exists" in str(e):
-                pass
-            else:
-                raise
+
+    async def configure_vchordrq(self, connection: asyncpg.Connection) -> None:
+        """Configure VCHORDRQ extension for vector similarity search.
+
+        Raises:
+            asyncpg.exceptions.UndefinedObjectError: If VCHORDRQ extension is not installed
+            asyncpg.exceptions.InvalidParameterValueError: If parameter value is invalid
+
+        Note:
+            This method does not catch exceptions. Configuration errors will fail-fast,
+            while transient connection errors will be retried by _run_with_retry.
+        """
+        # Handle probes parameter - only set if non-empty value is provided
+        if self.vchordrq_probes and str(self.vchordrq_probes).strip():
+            await connection.execute(f"SET vchordrq.probes TO '{self.vchordrq_probes}'")
+            logger.debug(f"PostgreSQL, VCHORDRQ probes set to: {self.vchordrq_probes}")
+
+        # Handle epsilon parameter independently - check for None to allow 0.0 as valid value
+        if self.vchordrq_epsilon is not None:
+            await connection.execute(f"SET vchordrq.epsilon TO {self.vchordrq_epsilon}")
+            logger.debug(
+                f"PostgreSQL, VCHORDRQ epsilon set to: {self.vchordrq_epsilon}"
+            )
 
     async def _migrate_llm_cache_schema(self):
         """Migrate LLM cache schema: add new columns and remove deprecated mode field"""
@@ -379,49 +563,74 @@ class PostgreSQLDB:
             "LIGHTRAG_DOC_STATUS": ["created_at", "updated_at"],
         }
 
-        for table_name, columns in tables_to_migrate.items():
-            for column_name in columns:
-                try:
-                    # Check if column exists
-                    check_column_sql = f"""
-                    SELECT column_name, data_type
-                    FROM information_schema.columns
-                    WHERE table_name = '{table_name.lower()}'
-                    AND column_name = '{column_name}'
-                    """
+        try:
+            # Optimization: Batch check all columns in one query instead of 8 separate queries
+            table_names_lower = [t.lower() for t in tables_to_migrate.keys()]
+            all_column_names = list(
+                set(col for cols in tables_to_migrate.values() for col in cols)
+            )
 
-                    column_info = await self.query(check_column_sql)
-                    if not column_info:
+            check_all_columns_sql = """
+            SELECT table_name, column_name, data_type
+            FROM information_schema.columns
+            WHERE table_name = ANY($1)
+            AND column_name = ANY($2)
+            """
+
+            all_columns_result = await self.query(
+                check_all_columns_sql,
+                [table_names_lower, all_column_names],
+                multirows=True,
+            )
+
+            # Build lookup dict: (table_name, column_name) -> data_type
+            column_types = {}
+            if all_columns_result:
+                column_types = {
+                    (row["table_name"].upper(), row["column_name"]): row["data_type"]
+                    for row in all_columns_result
+                }
+
+            # Now iterate and migrate only what's needed
+            for table_name, columns in tables_to_migrate.items():
+                for column_name in columns:
+                    try:
+                        data_type = column_types.get((table_name, column_name))
+
+                        if not data_type:
+                            logger.warning(
+                                f"Column {table_name}.{column_name} does not exist, skipping migration"
+                            )
+                            continue
+
+                        # Check column type
+                        if data_type == "timestamp without time zone":
+                            logger.debug(
+                                f"Column {table_name}.{column_name} is already witimezone-free, no migration needed"
+                            )
+                            continue
+
+                        # Execute migration, explicitly specifying UTC timezone for interpreting original data
+                        logger.info(
+                            f"Migrating {table_name}.{column_name} from {data_type} to TIMESTAMP(0) type"
+                        )
+                        migration_sql = f"""
+                        ALTER TABLE {table_name}
+                        ALTER COLUMN {column_name} TYPE TIMESTAMP(0),
+                        ALTER COLUMN {column_name} SET DEFAULT CURRENT_TIMESTAMP
+                        """
+
+                        await self.execute(migration_sql)
+                        logger.info(
+                            f"Successfully migrated {table_name}.{column_name} to timezone-free type"
+                        )
+                    except Exception as e:
+                        # Log error but don't interrupt the process
                         logger.warning(
-                            f"Column {table_name}.{column_name} does not exist, skipping migration"
+                            f"Failed to migrate {table_name}.{column_name}: {e}"
                         )
-                        continue
-
-                    # Check column type
-                    data_type = column_info.get("data_type")
-                    if data_type == "timestamp without time zone":
-                        logger.debug(
-                            f"Column {table_name}.{column_name} is already witimezone-free, no migration needed"
-                        )
-                        continue
-
-                    # Execute migration, explicitly specifying UTC timezone for interpreting original data
-                    logger.info(
-                        f"Migrating {table_name}.{column_name} from {data_type} to TIMESTAMP(0) type"
-                    )
-                    migration_sql = f"""
-                    ALTER TABLE {table_name}
-                    ALTER COLUMN {column_name} TYPE TIMESTAMP(0),
-                    ALTER COLUMN {column_name} SET DEFAULT CURRENT_TIMESTAMP
-                    """
-
-                    await self.execute(migration_sql)
-                    logger.info(
-                        f"Successfully migrated {table_name}.{column_name} to timezone-free type"
-                    )
-                except Exception as e:
-                    # Log error but don't interrupt the process
-                    logger.warning(f"Failed to migrate {table_name}.{column_name}: {e}")
+        except Exception as e:
+            logger.error(f"Failed to batch check timestamp columns: {e}")
 
     async def _migrate_doc_chunks_to_vdb_chunks(self):
         """
@@ -798,73 +1007,89 @@ class PostgreSQLDB:
             },
         ]
 
-        for migration in field_migrations:
-            try:
-                # Check current column definition
-                check_column_sql = """
-                SELECT column_name, data_type, character_maximum_length, is_nullable
-                FROM information_schema.columns
-                WHERE table_name = $1 AND column_name = $2
-                """
-                params = {
-                    "table_name": migration["table"].lower(),
-                    "column_name": migration["column"],
+        try:
+            # Optimization: Batch check all columns in one query instead of 5 separate queries
+            unique_tables = list(set(m["table"].lower() for m in field_migrations))
+            unique_columns = list(set(m["column"] for m in field_migrations))
+
+            check_all_columns_sql = """
+            SELECT table_name, column_name, data_type, character_maximum_length, is_nullable
+            FROM information_schema.columns
+            WHERE table_name = ANY($1)
+            AND column_name = ANY($2)
+            """
+
+            all_columns_result = await self.query(
+                check_all_columns_sql, [unique_tables, unique_columns], multirows=True
+            )
+
+            # Build lookup dict: (table_name, column_name) -> column_info
+            column_info_map = {}
+            if all_columns_result:
+                column_info_map = {
+                    (row["table_name"].upper(), row["column_name"]): row
+                    for row in all_columns_result
                 }
-                column_info = await self.query(
-                    check_column_sql,
-                    list(params.values()),
-                )
 
-                if not column_info:
+            # Now iterate and migrate only what's needed
+            for migration in field_migrations:
+                try:
+                    column_info = column_info_map.get(
+                        (migration["table"], migration["column"])
+                    )
+
+                    if not column_info:
+                        logger.warning(
+                            f"Column {migration['table']}.{migration['column']} does not exist, skipping migration"
+                        )
+                        continue
+
+                    current_type = column_info.get("data_type", "").lower()
+                    current_length = column_info.get("character_maximum_length")
+
+                    # Check if migration is needed
+                    needs_migration = False
+
+                    if migration["column"] == "entity_name" and current_length == 255:
+                        needs_migration = True
+                    elif (
+                        migration["column"] in ["source_id", "target_id"]
+                        and current_length == 256
+                    ):
+                        needs_migration = True
+                    elif (
+                        migration["column"] == "file_path"
+                        and current_type == "character varying"
+                    ):
+                        needs_migration = True
+
+                    if needs_migration:
+                        logger.info(
+                            f"Migrating {migration['table']}.{migration['column']}: {migration['description']}"
+                        )
+
+                        # Execute the migration
+                        alter_sql = f"""
+                        ALTER TABLE {migration["table"]}
+                        ALTER COLUMN {migration["column"]} TYPE {migration["new_type"]}
+                        """
+
+                        await self.execute(alter_sql)
+                        logger.info(
+                            f"Successfully migrated {migration['table']}.{migration['column']}"
+                        )
+                    else:
+                        logger.debug(
+                            f"Column {migration['table']}.{migration['column']} already has correct type, no migration needed"
+                        )
+
+                except Exception as e:
+                    # Log error but don't interrupt the process
                     logger.warning(
-                        f"Column {migration['table']}.{migration['column']} does not exist, skipping migration"
+                        f"Failed to migrate {migration['table']}.{migration['column']}: {e}"
                     )
-                    continue
-
-                current_type = column_info.get("data_type", "").lower()
-                current_length = column_info.get("character_maximum_length")
-
-                # Check if migration is needed
-                needs_migration = False
-
-                if migration["column"] == "entity_name" and current_length == 255:
-                    needs_migration = True
-                elif (
-                    migration["column"] in ["source_id", "target_id"]
-                    and current_length == 256
-                ):
-                    needs_migration = True
-                elif (
-                    migration["column"] == "file_path"
-                    and current_type == "character varying"
-                ):
-                    needs_migration = True
-
-                if needs_migration:
-                    logger.info(
-                        f"Migrating {migration['table']}.{migration['column']}: {migration['description']}"
-                    )
-
-                    # Execute the migration
-                    alter_sql = f"""
-                    ALTER TABLE {migration['table']}
-                    ALTER COLUMN {migration['column']} TYPE {migration['new_type']}
-                    """
-
-                    await self.execute(alter_sql)
-                    logger.info(
-                        f"Successfully migrated {migration['table']}.{migration['column']}"
-                    )
-                else:
-                    logger.debug(
-                        f"Column {migration['table']}.{migration['column']} already has correct type, no migration needed"
-                    )
-
-            except Exception as e:
-                # Log error but don't interrupt the process
-                logger.warning(
-                    f"Failed to migrate {migration['table']}.{migration['column']}: {e}"
-                )
+        except Exception as e:
+            logger.error(f"Failed to batch check field lengths: {e}")
 
     async def check_tables(self):
         # First create all tables
@@ -884,47 +1109,59 @@ class PostgreSQLDB:
                     )
                     raise e
 
-            # Create index for id column in each table
-            try:
+        # Batch check all indexes at once (optimization: single query instead of N queries)
+        try:
+            table_names = list(TABLES.keys())
+            table_names_lower = [t.lower() for t in table_names]
+
+            # Get all existing indexes for our tables in one query
+            check_all_indexes_sql = """
+            SELECT indexname, tablename
+            FROM pg_indexes
+            WHERE tablename = ANY($1)
+            """
+            existing_indexes_result = await self.query(
+                check_all_indexes_sql, [table_names_lower], multirows=True
+            )
+
+            # Build a set of existing index names for fast lookup
+            existing_indexes = set()
+            if existing_indexes_result:
+                existing_indexes = {row["indexname"] for row in existing_indexes_result}
+
+            # Create missing indexes
+            for k in table_names:
+                # Create index for id column if missing
                 index_name = f"idx_{k.lower()}_id"
-                check_index_sql = f"""
-                SELECT 1 FROM pg_indexes
-                WHERE indexname = '{index_name}'
-                AND tablename = '{k.lower()}'
-                """
-                index_exists = await self.query(check_index_sql)
+                if index_name not in existing_indexes:
+                    try:
+                        create_index_sql = f"CREATE INDEX {index_name} ON {k}(id)"
+                        logger.info(
+                            f"PostgreSQL, Creating index {index_name} on table {k}"
+                        )
+                        await self.execute(create_index_sql)
+                    except Exception as e:
+                        logger.error(
+                            f"PostgreSQL, Failed to create index {index_name}, Got: {e}"
+                        )
 
-                if not index_exists:
-                    create_index_sql = f"CREATE INDEX {index_name} ON {k}(id)"
-                    logger.info(f"PostgreSQL, Creating index {index_name} on table {k}")
-                    await self.execute(create_index_sql)
-            except Exception as e:
-                logger.error(
-                    f"PostgreSQL, Failed to create index on table {k}, Got: {e}"
-                )
-
-            # Create composite index for (workspace, id) columns in each table
-            try:
+                # Create composite index for (workspace, id) if missing
                 composite_index_name = f"idx_{k.lower()}_workspace_id"
-                check_composite_index_sql = f"""
-                SELECT 1 FROM pg_indexes
-                WHERE indexname = '{composite_index_name}'
-                AND tablename = '{k.lower()}'
-                """
-                composite_index_exists = await self.query(check_composite_index_sql)
-
-                if not composite_index_exists:
-                    create_composite_index_sql = (
-                        f"CREATE INDEX {composite_index_name} ON {k}(workspace, id)"
-                    )
-                    logger.info(
-                        f"PostgreSQL, Creating composite index {composite_index_name} on table {k}"
-                    )
-                    await self.execute(create_composite_index_sql)
-            except Exception as e:
-                logger.error(
-                    f"PostgreSQL, Failed to create composite index on table {k}, Got: {e}"
-                )
+                if composite_index_name not in existing_indexes:
+                    try:
+                        create_composite_index_sql = (
+                            f"CREATE INDEX {composite_index_name} ON {k}(workspace, id)"
+                        )
+                        logger.info(
+                            f"PostgreSQL, Creating composite index {composite_index_name} on table {k}"
+                        )
+                        await self.execute(create_composite_index_sql)
+                    except Exception as e:
+                        logger.error(
+                            f"PostgreSQL, Failed to create composite index {composite_index_name}, Got: {e}"
+                        )
+        except Exception as e:
+            logger.error(f"PostgreSQL, Failed to batch check/create indexes: {e}")
 
         # Create vector indexs
         if self.vector_index_type:
@@ -932,19 +1169,12 @@ class PostgreSQLDB:
                 f"PostgreSQL, Create vector indexs, type: {self.vector_index_type}"
             )
             try:
-                if self.vector_index_type == "HNSW":
-                    await self._create_hnsw_vector_indexes()
-                elif self.vector_index_type == "IVFFLAT":
-                    await self._create_ivfflat_vector_indexes()
-                elif self.vector_index_type == "FLAT":
-                    logger.warning(
-                        "FLAT index type is not supported by pgvector. Skipping vector index creation. "
-                        "Please use 'HNSW' or 'IVFFLAT' instead."
-                    )
+                if self.vector_index_type in ["HNSW", "IVFFLAT", "VCHORDRQ"]:
+                    await self._create_vector_indexes()
                 else:
                     logger.warning(
                         "Doesn't support this vector index type: {self.vector_index_type}. "
-                        "Supported types: HNSW, IVFFLAT"
+                        "Supported types: HNSW, IVFFLAT, VCHORDRQ"
                     )
             except Exception as e:
                 logger.error(
@@ -1068,7 +1298,9 @@ class PostgreSQLDB:
                     try:
                         # Create index for id column
                         index_name = f"idx_{table_name.lower()}_id"
-                        create_index_sql = f"CREATE INDEX {index_name} ON {table_name}(id)"
+                        create_index_sql = (
+                            f"CREATE INDEX {index_name} ON {table_name}(id)"
+                        )
                         await self.execute(create_index_sql)
                         logger.info(f"Created index {index_name} on table {table_name}")
 
@@ -1124,11 +1356,6 @@ class PostgreSQLDB:
                 "sql": "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_lightrag_doc_status_workspace_file_path ON LIGHTRAG_DOC_STATUS (workspace, file_path)",
                 "description": "Index for workspace + file_path sorting",
             },
-            {
-                "name": "idx_lightrag_doc_status_workspace_external_id",
-                "sql": "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_lightrag_doc_status_workspace_external_id ON LIGHTRAG_DOC_STATUS (workspace, (metadata->>'external_id')) WHERE metadata->>'external_id' IS NOT NULL",
-                "description": "Index for workspace + external_id for idempotency lookups",
-            },
         ]
 
         for index in indexes:
@@ -1154,21 +1381,39 @@ class PostgreSQLDB:
             except Exception as e:
                 logger.warning(f"Failed to create index {index['name']}: {e}")
 
-    async def _create_hnsw_vector_indexes(self):
+    async def _create_vector_indexes(self):
         vdb_tables = [
             "LIGHTRAG_VDB_CHUNKS",
             "LIGHTRAG_VDB_ENTITY",
             "LIGHTRAG_VDB_RELATION",
         ]
 
-        embedding_dim = int(os.environ.get("EMBEDDING_DIM", 1024))
+        create_sql = {
+            "HNSW": f"""
+                CREATE INDEX {{vector_index_name}}
+                ON {{k}} USING hnsw (content_vector vector_cosine_ops)
+                WITH (m = {self.hnsw_m}, ef_construction = {self.hnsw_ef})
+            """,
+            "IVFFLAT": f"""
+                CREATE INDEX {{vector_index_name}}
+                ON {{k}} USING ivfflat (content_vector vector_cosine_ops)
+                WITH (lists = {self.ivfflat_lists})
+            """,
+            "VCHORDRQ": f"""
+                CREATE INDEX {{vector_index_name}}
+                ON {{k}} USING vchordrq (content_vector vector_cosine_ops)
+                {f'WITH (options = $${self.vchordrq_build_options}$$)' if self.vchordrq_build_options else ''}
+            """,
+        }
 
+        embedding_dim = int(os.environ.get("EMBEDDING_DIM", 1024))
         for k in vdb_tables:
-            vector_index_name = f"idx_{k.lower()}_hnsw_cosine"
+            vector_index_name = (
+                f"idx_{k.lower()}_{self.vector_index_type.lower()}_cosine"
+            )
             check_vector_index_sql = f"""
                     SELECT 1 FROM pg_indexes
-                    WHERE indexname = '{vector_index_name}'
-                      AND tablename = '{k.lower()}'
+                    WHERE indexname = '{vector_index_name}' AND tablename = '{k.lower()}'
                 """
             try:
                 vector_index_exists = await self.query(check_vector_index_sql)
@@ -1177,63 +1422,23 @@ class PostgreSQLDB:
                     alter_sql = f"ALTER TABLE {k} ALTER COLUMN content_vector TYPE VECTOR({embedding_dim})"
                     await self.execute(alter_sql)
                     logger.debug(f"Ensured vector dimension for {k}")
-
-                    create_vector_index_sql = f"""
-                            CREATE INDEX {vector_index_name}
-                            ON {k} USING hnsw (content_vector vector_cosine_ops)
-                            WITH (m = {self.hnsw_m}, ef_construction = {self.hnsw_ef})
-                        """
-                    logger.info(f"Creating hnsw index {vector_index_name} on table {k}")
-                    await self.execute(create_vector_index_sql)
+                    logger.info(
+                        f"Creating {self.vector_index_type} index {vector_index_name} on table {k}"
+                    )
+                    await self.execute(
+                        create_sql[self.vector_index_type].format(
+                            vector_index_name=vector_index_name, k=k
+                        )
+                    )
                     logger.info(
                         f"Successfully created vector index {vector_index_name} on table {k}"
                     )
                 else:
                     logger.info(
-                        f"HNSW vector index {vector_index_name} already exists on table {k}"
+                        f"{self.vector_index_type} vector index {vector_index_name} already exists on table {k}"
                     )
             except Exception as e:
                 logger.error(f"Failed to create vector index on table {k}, Got: {e}")
-
-    async def _create_ivfflat_vector_indexes(self):
-        vdb_tables = [
-            "LIGHTRAG_VDB_CHUNKS",
-            "LIGHTRAG_VDB_ENTITY",
-            "LIGHTRAG_VDB_RELATION",
-        ]
-
-        embedding_dim = int(os.environ.get("EMBEDDING_DIM", 1024))
-
-        for k in vdb_tables:
-            index_name = f"idx_{k.lower()}_ivfflat_cosine"
-            check_index_sql = f"""
-                    SELECT 1 FROM pg_indexes
-                    WHERE indexname = '{index_name}' AND tablename = '{k.lower()}'
-                """
-            try:
-                exists = await self.query(check_index_sql)
-                if not exists:
-                    # Only set vector dimension when index doesn't exist
-                    alter_sql = f"ALTER TABLE {k} ALTER COLUMN content_vector TYPE VECTOR({embedding_dim})"
-                    await self.execute(alter_sql)
-                    logger.debug(f"Ensured vector dimension for {k}")
-
-                    create_sql = f"""
-                            CREATE INDEX {index_name}
-                            ON {k} USING ivfflat (content_vector vector_cosine_ops)
-                            WITH (lists = {self.ivfflat_lists})
-                        """
-                    logger.info(f"Creating ivfflat index {index_name} on table {k}")
-                    await self.execute(create_sql)
-                    logger.info(
-                        f"Successfully created ivfflat index {index_name} on table {k}"
-                    )
-                else:
-                    logger.info(
-                        f"Ivfflat vector index {index_name} already exists on table {k}"
-                    )
-            except Exception as e:
-                logger.error(f"Failed to create ivfflat index on {k}: {e}")
 
     async def query(
         self,
@@ -1243,31 +1448,31 @@ class PostgreSQLDB:
         with_age: bool = False,
         graph_name: str | None = None,
     ) -> dict[str, Any] | None | list[dict[str, Any]]:
-        async with self.pool.acquire() as connection:  # type: ignore
-            # Set tenant context if available
-            tenant_id = get_current_tenant_id()
-            if tenant_id:
-                await connection.execute(f"SET app.current_tenant = '{tenant_id}'")
+        async def _operation(connection: asyncpg.Connection) -> Any:
+            prepared_params = tuple(params) if params else ()
+            if prepared_params:
+                rows = await connection.fetch(sql, *prepared_params)
+            else:
+                rows = await connection.fetch(sql)
 
-            if with_age and graph_name:
-                await self.configure_age(connection, graph_name)  # type: ignore
-            elif with_age and not graph_name:
-                raise ValueError("Graph name is required when with_age is True")
+            if multirows:
+                if rows:
+                    columns = [col for col in rows[0].keys()]
+                    return [dict(zip(columns, row)) for row in rows]
+                return []
 
-            try:
-                if params:
-                    if multirows:
-                        return await connection.fetch(sql, *params)
-                    else:
-                        return await connection.fetchrow(sql, *params)
-                else:
-                    if multirows:
-                        return await connection.fetch(sql)
-                    else:
-                        return await connection.fetchrow(sql)
-            except Exception as e:
-                logger.error(f"PostgreSQL database, error:{e}")
-                raise
+            if rows:
+                columns = rows[0].keys()
+                return dict(zip(columns, rows[0]))
+            return None
+
+        try:
+            return await self._run_with_retry(
+                _operation, with_age=with_age, graph_name=graph_name
+            )
+        except Exception as e:
+            logger.error(f"PostgreSQL database, error:{e}")
+            raise
 
     async def execute(
         self,
@@ -1278,36 +1483,33 @@ class PostgreSQLDB:
         with_age: bool = False,
         graph_name: str | None = None,
     ):
+        async def _operation(connection: asyncpg.Connection) -> Any:
+            prepared_values = tuple(data.values()) if data else ()
+            try:
+                if not data:
+                    return await connection.execute(sql)
+                return await connection.execute(sql, *prepared_values)
+            except (
+                asyncpg.exceptions.UniqueViolationError,
+                asyncpg.exceptions.DuplicateTableError,
+                asyncpg.exceptions.DuplicateObjectError,
+                asyncpg.exceptions.InvalidSchemaNameError,
+            ) as e:
+                if ignore_if_exists:
+                    logger.debug("PostgreSQL, ignoring duplicate during execute: %r", e)
+                    return None
+                if upsert:
+                    logger.info(
+                        "PostgreSQL, duplicate detected but treated as upsert success: %r",
+                        e,
+                    )
+                    return None
+                raise
+
         try:
-            async with self.pool.acquire() as connection:  # type: ignore
-                # Set tenant context if available
-                tenant_id = get_current_tenant_id()
-                if tenant_id:
-                    await connection.execute(f"SET app.current_tenant = '{tenant_id}'")
-
-                if with_age and graph_name:
-                    await self.configure_age(connection, graph_name)
-                elif with_age and not graph_name:
-                    raise ValueError("Graph name is required when with_age is True")
-
-                if data is None:
-                    await connection.execute(sql)
-                else:
-                    await connection.execute(sql, *data.values())
-        except (
-            asyncpg.exceptions.UniqueViolationError,
-            asyncpg.exceptions.DuplicateTableError,
-            asyncpg.exceptions.DuplicateObjectError,  # Catch "already exists" error
-            asyncpg.exceptions.InvalidSchemaNameError,  # Also catch for AGE extension "already exists"
-            # asyncpg.exceptions.UndefinedTableError,  # Catch "relation does not exist" for index creation
-        ) as e:
-            if ignore_if_exists:
-                # If the flag is set, just ignore these specific errors
-                pass
-            elif upsert:
-                print("Key value duplicate, but upsert succeeded.")
-            else:
-                logger.error(f"Upsert error: {e}")
+            await self._run_with_retry(
+                _operation, with_age=with_age, graph_name=graph_name
+            )
         except Exception as e:
             logger.error(f"PostgreSQL database,\nsql:{sql},\ndata:{data},\nerror:{e}")
             raise
@@ -1392,6 +1594,72 @@ class ClientManager:
                     config.get("postgres", "ivfflat_lists", fallback="100"),
                 )
             ),
+            "vchordrq_build_options": os.environ.get(
+                "POSTGRES_VCHORDRQ_BUILD_OPTIONS",
+                config.get("postgres", "vchordrq_build_options", fallback=""),
+            ),
+            "vchordrq_probes": os.environ.get(
+                "POSTGRES_VCHORDRQ_PROBES",
+                config.get("postgres", "vchordrq_probes", fallback=""),
+            ),
+            "vchordrq_epsilon": float(
+                os.environ.get(
+                    "POSTGRES_VCHORDRQ_EPSILON",
+                    config.get("postgres", "vchordrq_epsilon", fallback="1.9"),
+                )
+            ),
+            # Server settings for Supabase
+            "server_settings": os.environ.get(
+                "POSTGRES_SERVER_SETTINGS",
+                config.get("postgres", "server_options", fallback=None),
+            ),
+            "statement_cache_size": os.environ.get(
+                "POSTGRES_STATEMENT_CACHE_SIZE",
+                config.get("postgres", "statement_cache_size", fallback=None),
+            ),
+            # Connection retry configuration
+            "connection_retry_attempts": min(
+                10,
+                int(
+                    os.environ.get(
+                        "POSTGRES_CONNECTION_RETRIES",
+                        config.get("postgres", "connection_retries", fallback=3),
+                    )
+                ),
+            ),
+            "connection_retry_backoff": min(
+                5.0,
+                float(
+                    os.environ.get(
+                        "POSTGRES_CONNECTION_RETRY_BACKOFF",
+                        config.get(
+                            "postgres", "connection_retry_backoff", fallback=0.5
+                        ),
+                    )
+                ),
+            ),
+            "connection_retry_backoff_max": min(
+                60.0,
+                float(
+                    os.environ.get(
+                        "POSTGRES_CONNECTION_RETRY_BACKOFF_MAX",
+                        config.get(
+                            "postgres",
+                            "connection_retry_backoff_max",
+                            fallback=5.0,
+                        ),
+                    )
+                ),
+            ),
+            "pool_close_timeout": min(
+                30.0,
+                float(
+                    os.environ.get(
+                        "POSTGRES_POOL_CLOSE_TIMEOUT",
+                        config.get("postgres", "pool_close_timeout", fallback=5.0),
+                    )
+                ),
+            ),
         }
 
     @classmethod
@@ -1445,134 +1713,17 @@ class PGKVStorage(BaseKVStorage):
                 # Use "default" for compatibility (lowest priority)
                 self.workspace = "default"
 
-            # Apply multi-tenant isolation
-            self.workspace = self._get_composite_workspace()
-
     async def finalize(self):
-        async with get_storage_lock():
-            if self.db is not None:
-                await ClientManager.release_client(self.db)
-                self.db = None
+        if self.db is not None:
+            await ClientManager.release_client(self.db)
+            self.db = None
 
     ################ QUERY METHODS ################
-    async def get_all(self) -> dict[str, Any]:
-        """Get all data from storage
-
-        Returns:
-            Dictionary containing all stored data
-        """
-        table_name = namespace_to_table_name(self.namespace)
-        if not table_name:
-            logger.error(
-                f"[{self.workspace}] Unknown namespace for get_all: {self.namespace}"
-            )
-            return {}
-
-        sql = f"SELECT * FROM {table_name} WHERE workspace=$1"
-        params = {"workspace": self.workspace}
-
-        try:
-            results = await self.db.query(sql, list(params.values()), multirows=True)
-
-            # Special handling for LLM cache to ensure compatibility with _get_cached_extraction_results
-            if is_namespace(self.namespace, NameSpace.KV_STORE_LLM_RESPONSE_CACHE):
-                processed_results = {}
-                for row in results:
-                    create_time = row.get("create_time", 0)
-                    update_time = row.get("update_time", 0)
-                    # Map field names and add cache_type for compatibility
-                    processed_row = {
-                        **row,
-                        "return": row.get("return_value", ""),
-                        "cache_type": row.get("original_prompt", "unknow"),
-                        "original_prompt": row.get("original_prompt", ""),
-                        "chunk_id": row.get("chunk_id"),
-                        "mode": row.get("mode", "default"),
-                        "create_time": create_time,
-                        "update_time": create_time if update_time == 0 else update_time,
-                    }
-                    processed_results[row["id"]] = processed_row
-                return processed_results
-
-            # For text_chunks namespace, parse llm_cache_list JSON string back to list
-            if is_namespace(self.namespace, NameSpace.KV_STORE_TEXT_CHUNKS):
-                processed_results = {}
-                for row in results:
-                    row = dict(row)
-                    llm_cache_list = row.get("llm_cache_list", [])
-                    if isinstance(llm_cache_list, str):
-                        try:
-                            llm_cache_list = json.loads(llm_cache_list)
-                        except json.JSONDecodeError:
-                            llm_cache_list = []
-                    row["llm_cache_list"] = llm_cache_list
-                    create_time = row.get("create_time", 0)
-                    update_time = row.get("update_time", 0)
-                    row["create_time"] = create_time
-                    row["update_time"] = (
-                        create_time if update_time == 0 else update_time
-                    )
-                    processed_results[row["id"]] = row
-                return processed_results
-
-            # For FULL_ENTITIES namespace, parse entity_names JSON string back to list
-            if is_namespace(self.namespace, NameSpace.KV_STORE_FULL_ENTITIES):
-                processed_results = {}
-                for row in results:
-                    row = dict(row)
-                    entity_names = row.get("entity_names", [])
-                    if isinstance(entity_names, str):
-                        try:
-                            entity_names = json.loads(entity_names)
-                        except json.JSONDecodeError:
-                            entity_names = []
-                    row["entity_names"] = entity_names
-                    create_time = row.get("create_time", 0)
-                    update_time = row.get("update_time", 0)
-                    row["create_time"] = create_time
-                    row["update_time"] = (
-                        create_time if update_time == 0 else update_time
-                    )
-                    processed_results[row["id"]] = row
-                return processed_results
-
-            # For FULL_RELATIONS namespace, parse relation_pairs JSON string back to list
-            if is_namespace(self.namespace, NameSpace.KV_STORE_FULL_RELATIONS):
-                processed_results = {}
-                for row in results:
-                    row = dict(row)
-                    relation_pairs = row.get("relation_pairs", [])
-                    if isinstance(relation_pairs, str):
-                        try:
-                            relation_pairs = json.loads(relation_pairs)
-                        except json.JSONDecodeError:
-                            relation_pairs = []
-                    row["relation_pairs"] = relation_pairs
-                    create_time = row.get("create_time", 0)
-                    update_time = row.get("update_time", 0)
-                    row["create_time"] = create_time
-                    row["update_time"] = (
-                        create_time if update_time == 0 else update_time
-                    )
-                    processed_results[row["id"]] = row
-                return processed_results
-
-            # For other namespaces, return as-is
-            return {row["id"]: row for row in results}
-        except Exception as e:
-            logger.error(
-                f"[{self.workspace}] Error retrieving all data from {self.namespace}: {e}"
-            )
-            return {}
-
     async def get_by_id(self, id: str) -> dict[str, Any] | None:
         """Get data by id."""
         sql = SQL_TEMPLATES["get_by_id_" + self.namespace]
         params = {"workspace": self.workspace, "id": id}
         response = await self.db.query(sql, list(params.values()))
-        
-        if response:
-            response = dict(response)
 
         if response and is_namespace(self.namespace, NameSpace.KV_STORE_TEXT_CHUNKS):
             # Parse llm_cache_list JSON string back to list
@@ -1643,19 +1794,69 @@ class PGKVStorage(BaseKVStorage):
             response["create_time"] = create_time
             response["update_time"] = create_time if update_time == 0 else update_time
 
+        # Special handling for ENTITY_CHUNKS namespace
+        if response and is_namespace(self.namespace, NameSpace.KV_STORE_ENTITY_CHUNKS):
+            # Parse chunk_ids JSON string back to list
+            chunk_ids = response.get("chunk_ids", [])
+            if isinstance(chunk_ids, str):
+                try:
+                    chunk_ids = json.loads(chunk_ids)
+                except json.JSONDecodeError:
+                    chunk_ids = []
+            response["chunk_ids"] = chunk_ids
+            create_time = response.get("create_time", 0)
+            update_time = response.get("update_time", 0)
+            response["create_time"] = create_time
+            response["update_time"] = create_time if update_time == 0 else update_time
+
+        # Special handling for RELATION_CHUNKS namespace
+        if response and is_namespace(
+            self.namespace, NameSpace.KV_STORE_RELATION_CHUNKS
+        ):
+            # Parse chunk_ids JSON string back to list
+            chunk_ids = response.get("chunk_ids", [])
+            if isinstance(chunk_ids, str):
+                try:
+                    chunk_ids = json.loads(chunk_ids)
+                except json.JSONDecodeError:
+                    chunk_ids = []
+            response["chunk_ids"] = chunk_ids
+            create_time = response.get("create_time", 0)
+            update_time = response.get("update_time", 0)
+            response["create_time"] = create_time
+            response["update_time"] = create_time if update_time == 0 else update_time
+
         return response if response else None
 
     # Query by id
     async def get_by_ids(self, ids: list[str]) -> list[dict[str, Any]]:
         """Get data by ids"""
-        sql = SQL_TEMPLATES["get_by_ids_" + self.namespace].format(
-            ids=",".join([f"'{id}'" for id in ids])
-        )
-        params = {"workspace": self.workspace}
+        if not ids:
+            return []
+
+        sql = SQL_TEMPLATES["get_by_ids_" + self.namespace]
+        params = {"workspace": self.workspace, "ids": ids}
         results = await self.db.query(sql, list(params.values()), multirows=True)
-        
-        if results:
-            results = [dict(r) for r in results]
+
+        def _order_results(
+            rows: list[dict[str, Any]] | None,
+        ) -> list[dict[str, Any] | None]:
+            """Preserve the caller requested ordering for bulk id lookups."""
+            if not rows:
+                return [None for _ in ids]
+
+            id_map: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                if row is None:
+                    continue
+                row_id = row.get("id")
+                if row_id is not None:
+                    id_map[str(row_id)] = row
+
+            ordered: list[dict[str, Any] | None] = []
+            for requested_id in ids:
+                ordered.append(id_map.get(str(requested_id)))
+            return ordered
 
         if results and is_namespace(self.namespace, NameSpace.KV_STORE_TEXT_CHUNKS):
             # Parse llm_cache_list JSON string back to list for each result
@@ -1699,7 +1900,7 @@ class PGKVStorage(BaseKVStorage):
                     "update_time": create_time if update_time == 0 else update_time,
                 }
                 processed_results.append(processed_row)
-            return processed_results
+            return _order_results(processed_results)
 
         # Special handling for FULL_ENTITIES namespace
         if results and is_namespace(self.namespace, NameSpace.KV_STORE_FULL_ENTITIES):
@@ -1733,15 +1934,48 @@ class PGKVStorage(BaseKVStorage):
                 result["create_time"] = create_time
                 result["update_time"] = create_time if update_time == 0 else update_time
 
-        return results if results else []
+        # Special handling for ENTITY_CHUNKS namespace
+        if results and is_namespace(self.namespace, NameSpace.KV_STORE_ENTITY_CHUNKS):
+            for result in results:
+                # Parse chunk_ids JSON string back to list
+                chunk_ids = result.get("chunk_ids", [])
+                if isinstance(chunk_ids, str):
+                    try:
+                        chunk_ids = json.loads(chunk_ids)
+                    except json.JSONDecodeError:
+                        chunk_ids = []
+                result["chunk_ids"] = chunk_ids
+                create_time = result.get("create_time", 0)
+                update_time = result.get("update_time", 0)
+                result["create_time"] = create_time
+                result["update_time"] = create_time if update_time == 0 else update_time
+
+        # Special handling for RELATION_CHUNKS namespace
+        if results and is_namespace(self.namespace, NameSpace.KV_STORE_RELATION_CHUNKS):
+            for result in results:
+                # Parse chunk_ids JSON string back to list
+                chunk_ids = result.get("chunk_ids", [])
+                if isinstance(chunk_ids, str):
+                    try:
+                        chunk_ids = json.loads(chunk_ids)
+                    except json.JSONDecodeError:
+                        chunk_ids = []
+                result["chunk_ids"] = chunk_ids
+                create_time = result.get("create_time", 0)
+                update_time = result.get("update_time", 0)
+                result["create_time"] = create_time
+                result["update_time"] = create_time if update_time == 0 else update_time
+
+        return _order_results(results)
 
     async def filter_keys(self, keys: set[str]) -> set[str]:
         """Filter out duplicated content"""
-        sql = SQL_TEMPLATES["filter_keys"].format(
-            table_name=namespace_to_table_name(self.namespace),
-            ids=",".join([f"'{id}'" for id in keys]),
-        )
-        params = {"workspace": self.workspace}
+        if not keys:
+            return set()
+
+        table_name = namespace_to_table_name(self.namespace)
+        sql = f"SELECT id FROM {table_name} WHERE workspace=$1 AND id = ANY($2)"
+        params = {"workspace": self.workspace, "ids": list(keys)}
         try:
             res = await self.db.query(sql, list(params.values()), multirows=True)
             if res:
@@ -1786,6 +2020,7 @@ class PGKVStorage(BaseKVStorage):
                 _data = {
                     "id": k,
                     "content": v["content"],
+                    "doc_name": v.get("file_path", ""),  # Map file_path to doc_name
                     "workspace": self.workspace,
                 }
                 await self.db.execute(upsert_sql, _data)
@@ -1835,32 +2070,60 @@ class PGKVStorage(BaseKVStorage):
                     "update_time": current_time,
                 }
                 await self.db.execute(upsert_sql, _data)
-        elif is_namespace(self.namespace, NameSpace.KV_STORE_TENANTS):
+        elif is_namespace(self.namespace, NameSpace.KV_STORE_ENTITY_CHUNKS):
+            # Get current UTC time and convert to naive datetime for database storage
+            current_time = datetime.datetime.now(timezone.utc).replace(tzinfo=None)
             for k, v in data.items():
-                upsert_sql = SQL_TEMPLATES["upsert_tenants"]
+                upsert_sql = SQL_TEMPLATES["upsert_entity_chunks"]
                 _data = {
                     "workspace": self.workspace,
                     "id": k,
-                    "data": json.dumps(v),
-                    "create_time": v.get("create_time"),
-                    "update_time": v.get("update_time"),
+                    "chunk_ids": json.dumps(v["chunk_ids"]),
+                    "count": v["count"],
+                    "create_time": current_time,
+                    "update_time": current_time,
                 }
                 await self.db.execute(upsert_sql, _data)
-        elif is_namespace(self.namespace, NameSpace.KV_STORE_KNOWLEDGE_BASES):
+        elif is_namespace(self.namespace, NameSpace.KV_STORE_RELATION_CHUNKS):
+            # Get current UTC time and convert to naive datetime for database storage
+            current_time = datetime.datetime.now(timezone.utc).replace(tzinfo=None)
             for k, v in data.items():
-                upsert_sql = SQL_TEMPLATES["upsert_knowledge_bases"]
+                upsert_sql = SQL_TEMPLATES["upsert_relation_chunks"]
                 _data = {
                     "workspace": self.workspace,
                     "id": k,
-                    "data": json.dumps(v),
-                    "create_time": v.get("create_time"),
-                    "update_time": v.get("update_time"),
+                    "chunk_ids": json.dumps(v["chunk_ids"]),
+                    "count": v["count"],
+                    "create_time": current_time,
+                    "update_time": current_time,
                 }
                 await self.db.execute(upsert_sql, _data)
 
     async def index_done_callback(self) -> None:
         # PG handles persistence automatically
         pass
+
+    async def is_empty(self) -> bool:
+        """Check if the storage is empty for the current workspace and namespace
+
+        Returns:
+            bool: True if storage is empty, False otherwise
+        """
+        table_name = namespace_to_table_name(self.namespace)
+        if not table_name:
+            logger.error(
+                f"[{self.workspace}] Unknown namespace for is_empty check: {self.namespace}"
+            )
+            return True
+
+        sql = f"SELECT EXISTS(SELECT 1 FROM {table_name} WHERE workspace=$1 LIMIT 1) as has_data"
+
+        try:
+            result = await self.db.query(sql, [self.workspace])
+            return not result.get("has_data", False) if result else True
+        except Exception as e:
+            logger.error(f"[{self.workspace}] Error checking if storage is empty: {e}")
+            return True
 
     async def delete(self, ids: list[str]) -> None:
         """Delete specific records from storage by their IDs
@@ -1895,22 +2158,21 @@ class PGKVStorage(BaseKVStorage):
 
     async def drop(self) -> dict[str, str]:
         """Drop the storage"""
-        async with get_storage_lock():
-            try:
-                table_name = namespace_to_table_name(self.namespace)
-                if not table_name:
-                    return {
-                        "status": "error",
-                        "message": f"Unknown namespace: {self.namespace}",
-                    }
+        try:
+            table_name = namespace_to_table_name(self.namespace)
+            if not table_name:
+                return {
+                    "status": "error",
+                    "message": f"Unknown namespace: {self.namespace}",
+                }
 
-                drop_sql = SQL_TEMPLATES["drop_specifiy_table_workspace"].format(
-                    table_name=table_name
-                )
-                await self.db.execute(drop_sql, {"workspace": self.workspace})
-                return {"status": "success", "message": "data dropped"}
-            except Exception as e:
-                return {"status": "error", "message": str(e)}
+            drop_sql = SQL_TEMPLATES["drop_specifiy_table_workspace"].format(
+                table_name=table_name
+            )
+            await self.db.execute(drop_sql, {"workspace": self.workspace})
+            return {"status": "success", "message": "data dropped"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
 
 
 @final
@@ -1944,14 +2206,10 @@ class PGVectorStorage(BaseVectorStorage):
                 # Use "default" for compatibility (lowest priority)
                 self.workspace = "default"
 
-            # Apply multi-tenant isolation
-            self.workspace = self._get_composite_workspace()
-
     async def finalize(self):
-        async with get_storage_lock():
-            if self.db is not None:
-                await ClientManager.release_client(self.db)
-                self.db = None
+        if self.db is not None:
+            await ClientManager.release_client(self.db)
+            self.db = None
 
     def _upsert_chunks(
         self, item: dict[str, Any], current_time: datetime.datetime
@@ -2215,7 +2473,23 @@ class PGVectorStorage(BaseVectorStorage):
 
         try:
             results = await self.db.query(query, list(params.values()), multirows=True)
-            return [dict(record) for record in results]
+            if not results:
+                return []
+
+            # Preserve caller requested ordering while normalizing asyncpg rows to dicts.
+            id_map: dict[str, dict[str, Any]] = {}
+            for record in results:
+                if record is None:
+                    continue
+                record_dict = dict(record)
+                row_id = record_dict.get("id")
+                if row_id is not None:
+                    id_map[str(row_id)] = record_dict
+
+            ordered_results: list[dict[str, Any] | None] = []
+            for requested_id in ids:
+                ordered_results.append(id_map.get(str(requested_id)))
+            return ordered_results
         except Exception as e:
             logger.error(
                 f"[{self.workspace}] Error retrieving vector data for IDs {ids}: {e}"
@@ -2271,22 +2545,21 @@ class PGVectorStorage(BaseVectorStorage):
 
     async def drop(self) -> dict[str, str]:
         """Drop the storage"""
-        async with get_storage_lock():
-            try:
-                table_name = namespace_to_table_name(self.namespace)
-                if not table_name:
-                    return {
-                        "status": "error",
-                        "message": f"Unknown namespace: {self.namespace}",
-                    }
+        try:
+            table_name = namespace_to_table_name(self.namespace)
+            if not table_name:
+                return {
+                    "status": "error",
+                    "message": f"Unknown namespace: {self.namespace}",
+                }
 
-                drop_sql = SQL_TEMPLATES["drop_specifiy_table_workspace"].format(
-                    table_name=table_name
-                )
-                await self.db.execute(drop_sql, {"workspace": self.workspace})
-                return {"status": "success", "message": "data dropped"}
-            except Exception as e:
-                return {"status": "error", "message": str(e)}
+            drop_sql = SQL_TEMPLATES["drop_specifiy_table_workspace"].format(
+                table_name=table_name
+            )
+            await self.db.execute(drop_sql, {"workspace": self.workspace})
+            return {"status": "success", "message": "data dropped"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
 
 
 @final
@@ -2321,18 +2594,18 @@ class PGDocStatusStorage(DocStatusStorage):
                 self.workspace = "default"
 
     async def finalize(self):
-        async with get_storage_lock():
-            if self.db is not None:
-                await ClientManager.release_client(self.db)
-                self.db = None
+        if self.db is not None:
+            await ClientManager.release_client(self.db)
+            self.db = None
 
     async def filter_keys(self, keys: set[str]) -> set[str]:
         """Filter out duplicated content"""
-        sql = SQL_TEMPLATES["filter_keys"].format(
-            table_name=namespace_to_table_name(self.namespace),
-            ids=",".join([f"'{id}'" for id in keys]),
-        )
-        params = {"workspace": self.workspace}
+        if not keys:
+            return set()
+
+        table_name = namespace_to_table_name(self.namespace)
+        sql = f"SELECT id FROM {table_name} WHERE workspace=$1 AND id = ANY($2)"
+        params = {"workspace": self.workspace, "ids": list(keys)}
         try:
             res = await self.db.query(sql, list(params.values()), multirows=True)
             if res:
@@ -2403,7 +2676,7 @@ class PGDocStatusStorage(DocStatusStorage):
         if not results:
             return []
 
-        processed_results = []
+        processed_map: dict[str, dict[str, Any]] = {}
         for row in results:
             # Parse chunks_list JSON string back to list
             chunks_list = row.get("chunks_list", [])
@@ -2425,23 +2698,25 @@ class PGDocStatusStorage(DocStatusStorage):
             created_at = self._format_datetime_with_timezone(row["created_at"])
             updated_at = self._format_datetime_with_timezone(row["updated_at"])
 
-            processed_results.append(
-                {
-                    "content_length": row["content_length"],
-                    "content_summary": row["content_summary"],
-                    "status": row["status"],
-                    "chunks_count": row["chunks_count"],
-                    "created_at": created_at,
-                    "updated_at": updated_at,
-                    "file_path": row["file_path"],
-                    "chunks_list": chunks_list,
-                    "metadata": metadata,
-                    "error_msg": row.get("error_msg"),
-                    "track_id": row.get("track_id"),
-                }
-            )
+            processed_map[str(row.get("id"))] = {
+                "content_length": row["content_length"],
+                "content_summary": row["content_summary"],
+                "status": row["status"],
+                "chunks_count": row["chunks_count"],
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "file_path": row["file_path"],
+                "chunks_list": chunks_list,
+                "metadata": metadata,
+                "error_msg": row.get("error_msg"),
+                "track_id": row.get("track_id"),
+            }
 
-        return processed_results
+        ordered_results: list[dict[str, Any] | None] = []
+        for requested_id in ids:
+            ordered_results.append(processed_map.get(str(requested_id)))
+
+        return ordered_results
 
     async def get_doc_by_file_path(self, file_path: str) -> Union[dict[str, Any], None]:
         """Get document by file path
@@ -2481,62 +2756,6 @@ class PGDocStatusStorage(DocStatusStorage):
             updated_at = self._format_datetime_with_timezone(result[0]["updated_at"])
 
             return dict(
-                content_length=result[0]["content_length"],
-                content_summary=result[0]["content_summary"],
-                status=result[0]["status"],
-                chunks_count=result[0]["chunks_count"],
-                created_at=created_at,
-                updated_at=updated_at,
-                file_path=result[0]["file_path"],
-                chunks_list=chunks_list,
-                metadata=metadata,
-                error_msg=result[0].get("error_msg"),
-                track_id=result[0].get("track_id"),
-            )
-
-    async def get_doc_by_external_id(self, external_id: str) -> Union[dict[str, Any], None]:
-        """Get document by external_id for idempotency support.
-        
-        Uses indexed lookup on metadata->>'external_id' for efficient retrieval.
-
-        Args:
-            external_id: The external unique identifier to search for
-
-        Returns:
-            Union[dict[str, Any], None]: Document data if found, None otherwise
-        """
-        sql = """
-            SELECT * FROM LIGHTRAG_DOC_STATUS 
-            WHERE workspace=$1 AND metadata->>'external_id' = $2
-        """
-        params = {"workspace": self.workspace, "external_id": external_id}
-        result = await self.db.query(sql, list(params.values()), True)
-
-        if result is None or result == []:
-            return None
-        else:
-            # Parse chunks_list JSON string back to list
-            chunks_list = result[0].get("chunks_list", [])
-            if isinstance(chunks_list, str):
-                try:
-                    chunks_list = json.loads(chunks_list)
-                except json.JSONDecodeError:
-                    chunks_list = []
-
-            # Parse metadata JSON string back to dict
-            metadata = result[0].get("metadata", {})
-            if isinstance(metadata, str):
-                try:
-                    metadata = json.loads(metadata)
-                except json.JSONDecodeError:
-                    metadata = {}
-
-            # Convert datetime objects to ISO format strings with timezone info
-            created_at = self._format_datetime_with_timezone(result[0]["created_at"])
-            updated_at = self._format_datetime_with_timezone(result[0]["updated_at"])
-
-            return dict(
-                id=result[0]["id"],
                 content_length=result[0]["content_length"],
                 content_summary=result[0]["content_summary"],
                 status=result[0]["status"],
@@ -2673,7 +2892,7 @@ class PGDocStatusStorage(DocStatusStorage):
 
     async def get_docs_paginated(
         self,
-        status_filter: DocStatus | None,
+        status_filter: DocStatus | None = None,
         page: int = 1,
         page_size: int = 50,
         sort_field: str = "updated_at",
@@ -2699,26 +2918,33 @@ class PGDocStatusStorage(DocStatusStorage):
         elif page_size > 200:
             page_size = 200
 
-        if sort_field not in ["created_at", "updated_at", "id", "file_path"]:
+        # Whitelist validation for sort_field to prevent SQL injection
+        allowed_sort_fields = {"created_at", "updated_at", "id", "file_path"}
+        if sort_field not in allowed_sort_fields:
             sort_field = "updated_at"
 
+        # Whitelist validation for sort_direction to prevent SQL injection
         if sort_direction.lower() not in ["asc", "desc"]:
             sort_direction = "desc"
+        else:
+            sort_direction = sort_direction.lower()
 
         # Calculate offset
         offset = (page - 1) * page_size
 
-        # Build WHERE clause
-        where_clause = "WHERE workspace=$1"
+        # Build parameterized query components
         params = {"workspace": self.workspace}
         param_count = 1
 
+        # Build WHERE clause with parameterized query
         if status_filter is not None:
             param_count += 1
-            where_clause += f" AND status=${param_count}"
+            where_clause = "WHERE workspace=$1 AND status=$2"
             params["status"] = status_filter.value
+        else:
+            where_clause = "WHERE workspace=$1"
 
-        # Build ORDER BY clause
+        # Build ORDER BY clause using validated whitelist values
         order_clause = f"ORDER BY {sort_field} {sort_direction.upper()}"
 
         # Query for total count
@@ -2726,7 +2952,7 @@ class PGDocStatusStorage(DocStatusStorage):
         count_result = await self.db.query(count_sql, list(params.values()))
         total_count = count_result["total"] if count_result else 0
 
-        # Query for paginated data
+        # Query for paginated data with parameterized LIMIT and OFFSET
         data_sql = f"""
             SELECT * FROM LIGHTRAG_DOC_STATUS
             {where_clause}
@@ -2809,6 +3035,28 @@ class PGDocStatusStorage(DocStatusStorage):
     async def index_done_callback(self) -> None:
         # PG handles persistence automatically
         pass
+
+    async def is_empty(self) -> bool:
+        """Check if the storage is empty for the current workspace and namespace
+
+        Returns:
+            bool: True if storage is empty, False otherwise
+        """
+        table_name = namespace_to_table_name(self.namespace)
+        if not table_name:
+            logger.error(
+                f"[{self.workspace}] Unknown namespace for is_empty check: {self.namespace}"
+            )
+            return True
+
+        sql = f"SELECT EXISTS(SELECT 1 FROM {table_name} WHERE workspace=$1 LIMIT 1) as has_data"
+
+        try:
+            result = await self.db.query(sql, [self.workspace])
+            return not result.get("has_data", False) if result else True
+        except Exception as e:
+            logger.error(f"[{self.workspace}] Error checking if storage is empty: {e}")
+            return True
 
     async def delete(self, ids: list[str]) -> None:
         """Delete specific records from storage by their IDs
@@ -2923,22 +3171,21 @@ class PGDocStatusStorage(DocStatusStorage):
 
     async def drop(self) -> dict[str, str]:
         """Drop the storage"""
-        async with get_storage_lock():
-            try:
-                table_name = namespace_to_table_name(self.namespace)
-                if not table_name:
-                    return {
-                        "status": "error",
-                        "message": f"Unknown namespace: {self.namespace}",
-                    }
+        try:
+            table_name = namespace_to_table_name(self.namespace)
+            if not table_name:
+                return {
+                    "status": "error",
+                    "message": f"Unknown namespace: {self.namespace}",
+                }
 
-                drop_sql = SQL_TEMPLATES["drop_specifiy_table_workspace"].format(
-                    table_name=table_name
-                )
-                await self.db.execute(drop_sql, {"workspace": self.workspace})
-                return {"status": "success", "message": "data dropped"}
-            except Exception as e:
-                return {"status": "error", "message": str(e)}
+            drop_sql = SQL_TEMPLATES["drop_specifiy_table_workspace"].format(
+                table_name=table_name
+            )
+            await self.db.execute(drop_sql, {"workspace": self.workspace})
+            return {"status": "success", "message": "data dropped"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
 
 
 class PGGraphQueryException(Exception):
@@ -2986,19 +3233,7 @@ class PGGraphStorage(BaseGraphStorage):
             # Ensure names comply with PostgreSQL identifier specifications
             safe_workspace = re.sub(r"[^a-zA-Z0-9_]", "_", workspace.strip())
             safe_namespace = re.sub(r"[^a-zA-Z0-9_]", "_", namespace)
-            graph_name = f"{safe_workspace}_{safe_namespace}"
-            
-            # Ensure graph name starts with a letter (AGE requirement)
-            if not graph_name[0].isalpha():
-                graph_name = f"g_{graph_name}"
-            
-            # PostgreSQL identifier limit is 63 bytes
-            if len(graph_name) > 63:
-                # Use MD5 hash to ensure uniqueness and fit within limit
-                hash_object = hashlib.md5(graph_name.encode())
-                graph_name = f"g_{hash_object.hexdigest()}"
-                
-            return graph_name
+            return f"{safe_workspace}_{safe_namespace}"
         else:
             # When the workspace is "default", use the namespace directly (for backward compatibility with legacy implementations)
             return re.sub(r"[^a-zA-Z0-9_]", "_", namespace)
@@ -3081,40 +3316,10 @@ class PGGraphStorage(BaseGraphStorage):
                     graph_name=self.graph_name,
                 )
 
-            # Verify that essential labels exist by checking the ag_label catalog
-            # This helps catch cases where label creation silently failed
-            try:
-                async with self.db.pool.acquire() as connection:
-                    await connection.execute("LOAD 'age'")  # Required for AGE functions
-                    await connection.execute('SET search_path = ag_catalog, "$user", public')
-                    # Check if 'base' label exists for this graph
-                    result = await connection.fetchrow(
-                        """
-                        SELECT l.name 
-                        FROM ag_catalog.ag_label l
-                        JOIN ag_catalog.ag_graph g ON l.graph = g.graphid
-                        WHERE l.name = 'base' AND g.name = $1
-                        """,
-                        self.graph_name
-                    )
-                    if result is None:
-                        logger.warning(
-                            f"[{self.workspace}] 'base' vlabel not found for graph '{self.graph_name}', attempting to create..."
-                        )
-                        # Retry creating the vlabel
-                        await connection.execute(
-                            f"SELECT create_vlabel('{self.graph_name}', 'base')"
-                        )
-                        logger.info(f"[{self.workspace}] Successfully created 'base' vlabel for graph '{self.graph_name}'")
-            except Exception as e:
-                if "already exists" not in str(e):
-                    logger.error(f"[{self.workspace}] Failed to verify/create 'base' vlabel: {e}")
-
     async def finalize(self):
-        async with get_graph_db_lock():
-            if self.db is not None:
-                await ClientManager.release_client(self.db)
-                self.db = None
+        if self.db is not None:
+            await ClientManager.release_client(self.db)
+            self.db = None
 
     async def index_done_callback(self) -> None:
         # PG handles persistence automatically
@@ -3276,7 +3481,6 @@ class PGGraphStorage(BaseGraphStorage):
         Returns:
             list[dict[str, Any]]: a list of dictionaries containing the result set
         """
-        logger.info(f"[{self.workspace}] Executing query: {query}")
         try:
             if readonly:
                 data = await self.db.query(
@@ -3299,7 +3503,8 @@ class PGGraphStorage(BaseGraphStorage):
                 {
                     "message": f"Error executing graph query: {query}",
                     "wrapped": query,
-                    "detail": str(e),
+                    "detail": repr(e),
+                    "error_type": e.__class__.__name__,
                 }
             ) from e
 
@@ -3368,17 +3573,13 @@ class PGGraphStorage(BaseGraphStorage):
     async def get_node(self, node_id: str) -> dict[str, str] | None:
         """Get node by its label identifier, return only node properties"""
 
-        label = self._normalize_node_id(node_id)
-
-        result = await self.get_nodes_batch(node_ids=[label])
+        result = await self.get_nodes_batch(node_ids=[node_id])
         if result and node_id in result:
             return result[node_id]
         return None
 
     async def node_degree(self, node_id: str) -> int:
-        label = self._normalize_node_id(node_id)
-
-        result = await self.node_degrees_batch(node_ids=[label])
+        result = await self.node_degrees_batch(node_ids=[node_id])
         if result and node_id in result:
             return result[node_id]
 
@@ -3391,12 +3592,11 @@ class PGGraphStorage(BaseGraphStorage):
         self, source_node_id: str, target_node_id: str
     ) -> dict[str, str] | None:
         """Get edge properties between two nodes"""
-        src_label = self._normalize_node_id(source_node_id)
-        tgt_label = self._normalize_node_id(target_node_id)
-
-        result = await self.get_edges_batch([{"src": src_label, "tgt": tgt_label}])
-        if result and (src_label, tgt_label) in result:
-            return result[(src_label, tgt_label)]
+        result = await self.get_edges_batch(
+            [{"src": source_node_id, "tgt": target_node_id}]
+        )
+        if result and (source_node_id, target_node_id) in result:
+            return result[(source_node_id, target_node_id)]
         return None
 
     async def get_node_edges(self, source_node_id: str) -> list[tuple[str, str]] | None:
@@ -3467,6 +3667,7 @@ class PGGraphStorage(BaseGraphStorage):
             raise
 
     @retry(
+        stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
         retry=retry_if_exception_type((PGGraphQueryException,)),
     )
@@ -3593,13 +3794,17 @@ class PGGraphStorage(BaseGraphStorage):
         if not node_ids:
             return {}
 
-        seen = set()
-        unique_ids = []
+        seen: set[str] = set()
+        unique_ids: list[str] = []
+        lookup: dict[str, str] = {}
+        requested: set[str] = set()
         for nid in node_ids:
-            nid_norm = self._normalize_node_id(nid)
-            if nid_norm not in seen:
-                seen.add(nid_norm)
-                unique_ids.append(nid_norm)
+            if nid not in seen:
+                seen.add(nid)
+                unique_ids.append(nid)
+            requested.add(nid)
+            lookup[nid] = nid
+            lookup[self._normalize_node_id(nid)] = nid
 
         # Build result dictionary
         nodes_dict = {}
@@ -3638,10 +3843,18 @@ class PGGraphStorage(BaseGraphStorage):
                             node_dict = json.loads(node_dict)
                         except json.JSONDecodeError:
                             logger.warning(
-                                f"Failed to parse node string in batch: {node_dict}"
+                                f"[{self.workspace}] Failed to parse node string in batch: {node_dict}"
                             )
 
-                    nodes_dict[result["node_id"]] = node_dict
+                    node_key = result["node_id"]
+                    original_key = lookup.get(node_key)
+                    if original_key is None:
+                        logger.warning(
+                            f"[{self.workspace}] Node {node_key} not found in lookup map"
+                        )
+                        original_key = node_key
+                    if original_key in requested:
+                        nodes_dict[original_key] = node_dict
 
         return nodes_dict
 
@@ -3664,13 +3877,17 @@ class PGGraphStorage(BaseGraphStorage):
         if not node_ids:
             return {}
 
-        seen = set()
+        seen: set[str] = set()
         unique_ids: list[str] = []
+        lookup: dict[str, str] = {}
+        requested: set[str] = set()
         for nid in node_ids:
-            n = self._normalize_node_id(nid)
-            if n not in seen:
-                seen.add(n)
-                unique_ids.append(n)
+            if nid not in seen:
+                seen.add(nid)
+                unique_ids.append(nid)
+            requested.add(nid)
+            lookup[nid] = nid
+            lookup[self._normalize_node_id(nid)] = nid
 
         out_degrees = {}
         in_degrees = {}
@@ -3722,10 +3939,16 @@ class PGGraphStorage(BaseGraphStorage):
                 node_id = row["node_id"]
                 if not node_id:
                     continue
-                out_degree = out_degrees.get(node_id, 0)
-                in_degree = in_degrees.get(node_id, 0)
-                out_degrees[node_id] = out_degree + int(row.get("out_degree", 0) or 0)
-                in_degrees[node_id] = in_degree + int(row.get("in_degree", 0) or 0)
+                node_key = node_id
+                original_key = lookup.get(node_key)
+                if original_key is None:
+                    logger.warning(
+                        f"[{self.workspace}] Node {node_key} not found in lookup map"
+                    )
+                    original_key = node_key
+                if original_key in requested:
+                    out_degrees[original_key] = int(row.get("out_degree", 0) or 0)
+                    in_degrees[original_key] = int(row.get("in_degree", 0) or 0)
 
         degrees_dict = {}
         for node_id in node_ids:
@@ -3829,13 +4052,15 @@ class PGGraphStorage(BaseGraphStorage):
             SELECT * FROM cypher({dollar_quote(self.graph_name)}::name,
                                  {dollar_quote(forward_cypher)}::cstring,
                                  $1::agtype)
-              AS (source text, target text, edge_properties agtype)"""
+              AS (source text, target text, edge_properties agtype)
+            """
 
             sql_bwd = f"""
             SELECT * FROM cypher({dollar_quote(self.graph_name)}::name,
                                  {dollar_quote(backward_cypher)}::cstring,
                                  $1::agtype)
-              AS (source text, target text, edge_properties agtype)"""
+              AS (source text, target text, edge_properties agtype)
+            """
 
             pg_params = {"params": json.dumps({"pairs": pairs}, ensure_ascii=False)}
 
@@ -3852,7 +4077,7 @@ class PGGraphStorage(BaseGraphStorage):
                             edge_props = json.loads(edge_props)
                         except json.JSONDecodeError:
                             logger.warning(
-                                f"Failed to parse edge properties string: {edge_props}"
+                                f"[{self.workspace}]Failed to parse edge properties string: {edge_props}"
                             )
                             continue
 
@@ -3868,7 +4093,7 @@ class PGGraphStorage(BaseGraphStorage):
                             edge_props = json.loads(edge_props)
                         except json.JSONDecodeError:
                             logger.warning(
-                                f"Failed to parse edge properties string: {edge_props}"
+                                f"[{self.workspace}] Failed to parse edge properties string: {edge_props}"
                             )
                             continue
 
@@ -3972,104 +4197,6 @@ class PGGraphStorage(BaseGraphStorage):
             if result and isinstance(result, dict) and "label" in result:
                 labels.append(result["label"])
         return labels
-
-    async def get_nodes_by_chunk_ids(self, chunk_ids: list[str]) -> list[dict]:
-        """
-        Retrieves nodes from the graph that are associated with a given list of chunk IDs.
-        This method uses a Cypher query with UNWIND to efficiently find all nodes
-        where the `source_id` property contains any of the specified chunk IDs.
-        """
-        # The string representation of the list for the cypher query
-        chunk_ids_str = json.dumps(chunk_ids)
-
-        query = f"""
-            SELECT * FROM cypher('{self.graph_name}', $$
-                UNWIND {chunk_ids_str} AS chunk_id
-                MATCH (n:base)
-                WHERE n.source_id IS NOT NULL AND chunk_id IN split(n.source_id, '{GRAPH_FIELD_SEP}')
-                RETURN n
-            $$) AS (n agtype);
-        """
-        results = await self._query(query)
-
-        # Build result list
-        nodes = []
-        for result in results:
-            if result["n"]:
-                node_dict = result["n"]["properties"]
-
-                # Process string result, parse it to JSON dictionary
-                if isinstance(node_dict, str):
-                    try:
-                        node_dict = json.loads(node_dict)
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            f"[{self.workspace}] Failed to parse node string in batch: {node_dict}"
-                        )
-
-                # Add node id (entity_id) to the dictionary for easier access
-                node_dict["id"] = node_dict.get("entity_id")
-                nodes.append(node_dict)
-
-        return nodes
-
-    async def get_edges_by_chunk_ids(self, chunk_ids: list[str]) -> list[dict]:
-        """
-        Retrieves edges from the graph that are associated with a given list of chunk IDs.
-        This method uses a Cypher query with UNWIND to efficiently find all edges
-        where the `source_id` property contains any of the specified chunk IDs.
-        """
-        chunk_ids_str = json.dumps(chunk_ids)
-
-        query = f"""
-            SELECT * FROM cypher('{self.graph_name}', $$
-                UNWIND {chunk_ids_str} AS chunk_id
-                MATCH ()-[r]-()
-                WHERE r.source_id IS NOT NULL AND chunk_id IN split(r.source_id, '{GRAPH_FIELD_SEP}')
-                RETURN DISTINCT r, startNode(r) AS source, endNode(r) AS target
-            $$) AS (edge agtype, source agtype, target agtype);
-        """
-        results = await self._query(query)
-        edges = []
-        if results:
-            for item in results:
-                edge_agtype = item["edge"]["properties"]
-                # Process string result, parse it to JSON dictionary
-                if isinstance(edge_agtype, str):
-                    try:
-                        edge_agtype = json.loads(edge_agtype)
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            f"[{self.workspace}] Failed to parse edge string in batch: {edge_agtype}"
-                        )
-                        edge_agtype = {}
-
-                source_agtype = item["source"]["properties"]
-                # Process string result, parse it to JSON dictionary
-                if isinstance(source_agtype, str):
-                    try:
-                        source_agtype = json.loads(source_agtype)
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            f"[{self.workspace}] Failed to parse node string in batch: {source_agtype}"
-                        )
-
-                target_agtype = item["target"]["properties"]
-                # Process string result, parse it to JSON dictionary
-                if isinstance(target_agtype, str):
-                    try:
-                        target_agtype = json.loads(target_agtype)
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            f"[{self.workspace}] Failed to parse node string in batch: {target_agtype}"
-                        )
-
-                if edge_agtype and source_agtype and target_agtype:
-                    edge_properties = edge_agtype
-                    edge_properties["source"] = source_agtype["entity_id"]
-                    edge_properties["target"] = target_agtype["entity_id"]
-                    edges.append(edge_properties)
-        return edges
 
     async def _bfs_subgraph(
         self, node_label: str, max_depth: int, max_nodes: int
@@ -4347,10 +4474,6 @@ class PGGraphStorage(BaseGraphStorage):
                     $$) AS (a AGTYPE, r AGTYPE, b AGTYPE)"""
                 results = await self._query(query)
 
-                logger.info(f"[{self.workspace}] Query results count: {len(results)}")
-                if results:
-                     logger.info(f"[{self.workspace}] First result sample: {results[0]}")
-
                 # Process query results, deduplicate nodes and edges
                 nodes_dict = {}
                 edges_dict = {}
@@ -4417,16 +4540,19 @@ class PGGraphStorage(BaseGraphStorage):
         Returns:
             A list of all nodes, where each node is a dictionary of its properties
         """
-        query = f"""SELECT * FROM cypher('{self.graph_name}', $$
-                     MATCH (n:base)
-                     RETURN n
-                   $$) AS (n agtype)"""
+        # Use native SQL to avoid Cypher wrapper overhead
+        # Original: SELECT * FROM cypher(...) with MATCH (n:base)
+        # Optimized: Direct table access for better performance
+        query = f"""
+            SELECT properties
+            FROM {self.graph_name}.base
+        """
 
         results = await self._query(query)
         nodes = []
         for result in results:
-            if result["n"]:
-                node_dict = result["n"]["properties"]
+            if result.get("properties"):
+                node_dict = result["properties"]
 
                 # Process string result, parse it to JSON dictionary
                 if isinstance(node_dict, str):
@@ -4436,6 +4562,7 @@ class PGGraphStorage(BaseGraphStorage):
                         logger.warning(
                             f"[{self.workspace}] Failed to parse node string: {node_dict}"
                         )
+                        continue
 
                 # Add node id (entity_id) to the dictionary for easier access
                 node_dict["id"] = node_dict.get("entity_id")
@@ -4447,12 +4574,21 @@ class PGGraphStorage(BaseGraphStorage):
 
         Returns:
             A list of all edges, where each edge is a dictionary of its properties
-            (The edge is bidirectional; deduplication must be handled by the caller)
+            (If 2 directional edges exist between the same pair of nodes, deduplication must be handled by the caller)
         """
-        query = f"""SELECT * FROM cypher('{self.graph_name}', $$
-                     MATCH (a:base)-[r]-(b:base)
-                     RETURN DISTINCT a.entity_id AS source, b.entity_id AS target, properties(r) AS properties
-                   $$) AS (source text, target text, properties agtype)"""
+        # Use native SQL to avoid Cartesian product (N×N) in Cypher MATCH
+        # Original Cypher: MATCH (a:base)-[r]-(b:base) creates ~50 billion row combinations
+        # Optimized: Start from edges table, join to nodes only to get entity_id
+        # Performance: O(E) instead of O(N²), ~50,000x faster for large graphs
+        query = f"""
+            SELECT DISTINCT
+                (ag_catalog.agtype_access_operator(VARIADIC ARRAY[a.properties, '"entity_id"'::agtype]))::text AS source,
+                (ag_catalog.agtype_access_operator(VARIADIC ARRAY[b.properties, '"entity_id"'::agtype]))::text AS target,
+                r.properties
+            FROM {self.graph_name}."DIRECTED" r
+            JOIN {self.graph_name}.base a ON r.start_id = a.id
+            JOIN {self.graph_name}.base b ON r.end_id = b.id
+        """
 
         results = await self._query(query)
         edges = []
@@ -4492,13 +4628,13 @@ class PGGraphStorage(BaseGraphStorage):
                 GROUP BY node_id
             )
             SELECT
-                (ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '"entity_id"'::agtype]))::text AS label
+                (ag_catalog.agtype_access_operator(VARIADIC ARRAY[v.properties, '"entity_id"'::agtype]))::text AS label
             FROM
                 node_degrees d
             JOIN
                 {self.graph_name}._ag_label_vertex v ON d.node_id = v.id
             WHERE
-                ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '"entity_id"'::agtype]) IS NOT NULL
+                ag_catalog.agtype_access_operator(VARIADIC ARRAY[v.properties, '"entity_id"'::agtype]) IS NOT NULL
             ORDER BY
                 d.degree DESC,
                 label ASC
@@ -4583,21 +4719,20 @@ class PGGraphStorage(BaseGraphStorage):
 
     async def drop(self) -> dict[str, str]:
         """Drop the storage"""
-        async with get_graph_db_lock():
-            try:
-                drop_query = f"""SELECT * FROM cypher('{self.graph_name}', $$
-                                MATCH (n)
-                                DETACH DELETE n
-                                $$) AS (n agtype)"""
+        try:
+            drop_query = f"""SELECT * FROM cypher('{self.graph_name}', $$
+                            MATCH (n)
+                            DETACH DELETE n
+                            $$) AS (result agtype)"""
 
-                await self._query(drop_query, readonly=False)
-                return {
-                    "status": "success",
-                    "message": f"workspace '{self.workspace}' graph data dropped",
-                }
-            except Exception as e:
-                logger.error(f"[{self.workspace}] Error dropping graph: {e}")
-                return {"status": "error", "message": str(e)}
+            await self._query(drop_query, readonly=False)
+            return {
+                "status": "success",
+                "message": f"workspace '{self.workspace}' graph data dropped",
+            }
+        except Exception as e:
+            logger.error(f"[{self.workspace}] Error dropping graph: {e}")
+            return {"status": "error", "message": str(e)}
 
 
 # Note: Order matters! More specific namespaces (e.g., "full_entities") must come before
@@ -4607,13 +4742,13 @@ NAMESPACE_TABLE_MAP = {
     NameSpace.KV_STORE_TEXT_CHUNKS: "LIGHTRAG_DOC_CHUNKS",
     NameSpace.KV_STORE_FULL_ENTITIES: "LIGHTRAG_FULL_ENTITIES",
     NameSpace.KV_STORE_FULL_RELATIONS: "LIGHTRAG_FULL_RELATIONS",
+    NameSpace.KV_STORE_ENTITY_CHUNKS: "LIGHTRAG_ENTITY_CHUNKS",
+    NameSpace.KV_STORE_RELATION_CHUNKS: "LIGHTRAG_RELATION_CHUNKS",
     NameSpace.KV_STORE_LLM_RESPONSE_CACHE: "LIGHTRAG_LLM_CACHE",
     NameSpace.VECTOR_STORE_CHUNKS: "LIGHTRAG_VDB_CHUNKS",
     NameSpace.VECTOR_STORE_ENTITIES: "LIGHTRAG_VDB_ENTITY",
     NameSpace.VECTOR_STORE_RELATIONSHIPS: "LIGHTRAG_VDB_RELATION",
     NameSpace.DOC_STATUS: "LIGHTRAG_DOC_STATUS",
-    NameSpace.KV_STORE_TENANTS: "LIGHTRAG_TENANTS",
-    NameSpace.KV_STORE_KNOWLEDGE_BASES: "LIGHTRAG_KNOWLEDGE_BASES",
 }
 
 
@@ -4624,26 +4759,6 @@ def namespace_to_table_name(namespace: str) -> str:
 
 
 TABLES = {
-    "LIGHTRAG_TENANTS": {
-        "ddl": """CREATE TABLE LIGHTRAG_TENANTS (
-                    id VARCHAR(255),
-                    workspace VARCHAR(255),
-                    data JSONB,
-                    create_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
-                    update_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
-                    CONSTRAINT LIGHTRAG_TENANTS_PK PRIMARY KEY (workspace, id)
-                    )"""
-    },
-    "LIGHTRAG_KNOWLEDGE_BASES": {
-        "ddl": """CREATE TABLE LIGHTRAG_KNOWLEDGE_BASES (
-                    id VARCHAR(255),
-                    workspace VARCHAR(255),
-                    data JSONB,
-                    create_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
-                    update_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
-                    CONSTRAINT LIGHTRAG_KNOWLEDGE_BASES_PK PRIMARY KEY (workspace, id)
-                    )"""
-    },
     "LIGHTRAG_DOC_FULL": {
         "ddl": """CREATE TABLE LIGHTRAG_DOC_FULL (
                     id VARCHAR(255),
@@ -4769,12 +4884,35 @@ TABLES = {
                     CONSTRAINT LIGHTRAG_FULL_RELATIONS_PK PRIMARY KEY (workspace, id)
                     )"""
     },
+    "LIGHTRAG_ENTITY_CHUNKS": {
+        "ddl": """CREATE TABLE LIGHTRAG_ENTITY_CHUNKS (
+                    id VARCHAR(512),
+                    workspace VARCHAR(255),
+                    chunk_ids JSONB,
+                    count INTEGER,
+                    create_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
+                    update_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT LIGHTRAG_ENTITY_CHUNKS_PK PRIMARY KEY (workspace, id)
+                    )"""
+    },
+    "LIGHTRAG_RELATION_CHUNKS": {
+        "ddl": """CREATE TABLE LIGHTRAG_RELATION_CHUNKS (
+                    id VARCHAR(512),
+                    workspace VARCHAR(255),
+                    chunk_ids JSONB,
+                    count INTEGER,
+                    create_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
+                    update_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT LIGHTRAG_RELATION_CHUNKS_PK PRIMARY KEY (workspace, id)
+                    )"""
+    },
 }
 
 
 SQL_TEMPLATES = {
     # SQL for KVStorage
-    "get_by_id_full_docs": """SELECT id, COALESCE(content, '') as content
+    "get_by_id_full_docs": """SELECT id, COALESCE(content, '') as content,
+                                COALESCE(doc_name, '') as file_path
                                 FROM LIGHTRAG_DOC_FULL WHERE workspace=$1 AND id=$2
                             """,
     "get_by_id_text_chunks": """SELECT id, tokens, COALESCE(content, '') as content,
@@ -4789,20 +4927,21 @@ SQL_TEMPLATES = {
                                 EXTRACT(EPOCH FROM update_time)::BIGINT as update_time
                                 FROM LIGHTRAG_LLM_CACHE WHERE workspace=$1 AND id=$2
                                """,
-    "get_by_ids_full_docs": """SELECT id, COALESCE(content, '') as content
-                                 FROM LIGHTRAG_DOC_FULL WHERE workspace=$1 AND id IN ({ids})
+    "get_by_ids_full_docs": """SELECT id, COALESCE(content, '') as content,
+                                 COALESCE(doc_name, '') as file_path
+                                 FROM LIGHTRAG_DOC_FULL WHERE workspace=$1 AND id = ANY($2)
                             """,
     "get_by_ids_text_chunks": """SELECT id, tokens, COALESCE(content, '') as content,
                                   chunk_order_index, full_doc_id, file_path,
                                   COALESCE(llm_cache_list, '[]'::jsonb) as llm_cache_list,
                                   EXTRACT(EPOCH FROM create_time)::BIGINT as create_time,
                                   EXTRACT(EPOCH FROM update_time)::BIGINT as update_time
-                                   FROM LIGHTRAG_DOC_CHUNKS WHERE workspace=$1 AND id IN ({ids})
+                                   FROM LIGHTRAG_DOC_CHUNKS WHERE workspace=$1 AND id = ANY($2)
                                 """,
     "get_by_ids_llm_response_cache": """SELECT id, original_prompt, return_value, chunk_id, cache_type, queryparam,
                                  EXTRACT(EPOCH FROM create_time)::BIGINT as create_time,
                                  EXTRACT(EPOCH FROM update_time)::BIGINT as update_time
-                                 FROM LIGHTRAG_LLM_CACHE WHERE workspace=$1 AND id IN ({ids})
+                                 FROM LIGHTRAG_LLM_CACHE WHERE workspace=$1 AND id = ANY($2)
                                 """,
     "get_by_id_full_entities": """SELECT id, entity_names, count,
                                 EXTRACT(EPOCH FROM create_time)::BIGINT as create_time,
@@ -4817,22 +4956,40 @@ SQL_TEMPLATES = {
     "get_by_ids_full_entities": """SELECT id, entity_names, count,
                                  EXTRACT(EPOCH FROM create_time)::BIGINT as create_time,
                                  EXTRACT(EPOCH FROM update_time)::BIGINT as update_time
-                                 FROM LIGHTRAG_FULL_ENTITIES WHERE workspace=$1 AND id IN ({ids})
+                                 FROM LIGHTRAG_FULL_ENTITIES WHERE workspace=$1 AND id = ANY($2)
                                 """,
     "get_by_ids_full_relations": """SELECT id, relation_pairs, count,
                                  EXTRACT(EPOCH FROM create_time)::BIGINT as create_time,
                                  EXTRACT(EPOCH FROM update_time)::BIGINT as update_time
-                                 FROM LIGHTRAG_FULL_RELATIONS WHERE workspace=$1 AND id IN ({ids})
+                                 FROM LIGHTRAG_FULL_RELATIONS WHERE workspace=$1 AND id = ANY($2)
                                 """,
-    "get_by_id_tenants": """SELECT data FROM LIGHTRAG_TENANTS WHERE workspace=$1 AND id=$2""",
-    "get_by_id_knowledge_bases": """SELECT data FROM LIGHTRAG_KNOWLEDGE_BASES WHERE workspace=$1 AND id=$2""",
-    "get_by_ids_tenants": """SELECT data FROM LIGHTRAG_TENANTS WHERE workspace=$1 AND id IN ({ids})""",
-    "get_by_ids_knowledge_bases": """SELECT data FROM LIGHTRAG_KNOWLEDGE_BASES WHERE workspace=$1 AND id IN ({ids})""",
+    "get_by_id_entity_chunks": """SELECT id, chunk_ids, count,
+                                EXTRACT(EPOCH FROM create_time)::BIGINT as create_time,
+                                EXTRACT(EPOCH FROM update_time)::BIGINT as update_time
+                                FROM LIGHTRAG_ENTITY_CHUNKS WHERE workspace=$1 AND id=$2
+                               """,
+    "get_by_id_relation_chunks": """SELECT id, chunk_ids, count,
+                                EXTRACT(EPOCH FROM create_time)::BIGINT as create_time,
+                                EXTRACT(EPOCH FROM update_time)::BIGINT as update_time
+                                FROM LIGHTRAG_RELATION_CHUNKS WHERE workspace=$1 AND id=$2
+                               """,
+    "get_by_ids_entity_chunks": """SELECT id, chunk_ids, count,
+                                 EXTRACT(EPOCH FROM create_time)::BIGINT as create_time,
+                                 EXTRACT(EPOCH FROM update_time)::BIGINT as update_time
+                                 FROM LIGHTRAG_ENTITY_CHUNKS WHERE workspace=$1 AND id = ANY($2)
+                                """,
+    "get_by_ids_relation_chunks": """SELECT id, chunk_ids, count,
+                                 EXTRACT(EPOCH FROM create_time)::BIGINT as create_time,
+                                 EXTRACT(EPOCH FROM update_time)::BIGINT as update_time
+                                 FROM LIGHTRAG_RELATION_CHUNKS WHERE workspace=$1 AND id = ANY($2)
+                                """,
     "filter_keys": "SELECT id FROM {table_name} WHERE workspace=$1 AND id IN ({ids})",
-    "upsert_doc_full": """INSERT INTO LIGHTRAG_DOC_FULL (id, content, workspace)
-                        VALUES ($1, $2, $3)
+    "upsert_doc_full": """INSERT INTO LIGHTRAG_DOC_FULL (id, content, doc_name, workspace)
+                        VALUES ($1, $2, $3, $4)
                         ON CONFLICT (workspace,id) DO UPDATE
-                           SET content = $2, update_time = CURRENT_TIMESTAMP
+                           SET content = $2,
+                               doc_name = $3,
+                               update_time = CURRENT_TIMESTAMP
                        """,
     "upsert_llm_response_cache": """INSERT INTO LIGHTRAG_LLM_CACHE(workspace,id,original_prompt,return_value,chunk_id,cache_type,queryparam)
                                       VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -4873,16 +5030,20 @@ SQL_TEMPLATES = {
                       count=EXCLUDED.count,
                       update_time = EXCLUDED.update_time
                      """,
-    "upsert_tenants": """INSERT INTO LIGHTRAG_TENANTS (workspace, id, data, create_time, update_time)
-                      VALUES ($1, $2, $3, $4, $5)
+    "upsert_entity_chunks": """INSERT INTO LIGHTRAG_ENTITY_CHUNKS (workspace, id, chunk_ids, count,
+                      create_time, update_time)
+                      VALUES ($1, $2, $3, $4, $5, $6)
                       ON CONFLICT (workspace,id) DO UPDATE
-                      SET data=EXCLUDED.data,
+                      SET chunk_ids=EXCLUDED.chunk_ids,
+                      count=EXCLUDED.count,
                       update_time = EXCLUDED.update_time
                      """,
-    "upsert_knowledge_bases": """INSERT INTO LIGHTRAG_KNOWLEDGE_BASES (workspace, id, data, create_time, update_time)
-                      VALUES ($1, $2, $3, $4, $5)
+    "upsert_relation_chunks": """INSERT INTO LIGHTRAG_RELATION_CHUNKS (workspace, id, chunk_ids, count,
+                      create_time, update_time)
+                      VALUES ($1, $2, $3, $4, $5, $6)
                       ON CONFLICT (workspace,id) DO UPDATE
-                      SET data=EXCLUDED.data,
+                      SET chunk_ids=EXCLUDED.chunk_ids,
+                      count=EXCLUDED.count,
                       update_time = EXCLUDED.update_time
                      """,
     # SQL for VectorStorage

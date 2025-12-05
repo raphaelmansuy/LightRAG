@@ -58,7 +58,7 @@ async def fetch_data(url, headers, data):
             return data_list
 
 
-@wrap_embedding_func_with_attrs(embedding_dim=2048)
+@wrap_embedding_func_with_attrs(embedding_dim=2048, max_token_size=8192)
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=4, max=60),
@@ -69,7 +69,8 @@ async def fetch_data(url, headers, data):
 )
 async def jina_embed(
     texts: list[str],
-    dimensions: int = 2048,
+    model: str = "jina-embeddings-v4",
+    embedding_dim: int = 2048,
     late_chunking: bool = False,
     base_url: str = None,
     api_key: str = None,
@@ -78,7 +79,14 @@ async def jina_embed(
 
     Args:
         texts: List of texts to embed.
-        dimensions: The embedding dimensions (default: 2048 for jina-embeddings-v4).
+        model: The Jina embedding model to use (default: jina-embeddings-v4).
+            Supported models: jina-embeddings-v3, jina-embeddings-v4, etc.
+        embedding_dim: The embedding dimensions (default: 2048 for jina-embeddings-v4).
+            **IMPORTANT**: This parameter is automatically injected by the EmbeddingFunc wrapper.
+            Do NOT manually pass this parameter when calling the function directly.
+            The dimension is controlled by the @wrap_embedding_func_with_attrs decorator.
+            Manually passing a different value will trigger a warning and be ignored.
+            When provided (by EmbeddingFunc), it will be passed to the Jina API for dimension reduction.
         late_chunking: Whether to use late chunking.
         base_url: Optional base URL for the Jina API.
         api_key: Optional Jina API key. If None, uses the JINA_API_KEY environment variable.
@@ -102,9 +110,9 @@ async def jina_embed(
         "Authorization": f"Bearer {os.environ['JINA_API_KEY']}",
     }
     data = {
-        "model": "jina-embeddings-v4",
+        "model": model,
         "task": "text-matching",
-        "dimensions": dimensions,
+        "dimensions": embedding_dim,
         "embedding_type": "base64",
         "input": texts,
     }
@@ -114,7 +122,7 @@ async def jina_embed(
         data["late_chunking"] = late_chunking
 
     logger.debug(
-        f"Jina embedding request: {len(texts)} texts, dimensions: {dimensions}"
+        f"Jina embedding request: {len(texts)} texts, dimensions: {embedding_dim}"
     )
 
     try:

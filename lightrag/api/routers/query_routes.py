@@ -4,18 +4,19 @@ This module contains all query-related routes for the LightRAG API.
 
 import json
 import logging
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException
 from lightrag import LightRAG
 from lightrag.base import QueryParam
 from lightrag.api.utils_api import get_combined_auth_dependency
-from lightrag.api.dependencies import get_tenant_context_optional
-from lightrag.models.tenant import TenantContext
-from lightrag.tenant_rag_manager import TenantRAGManager
 from pydantic import BaseModel, Field, field_validator
 
 from ascii_colors import trace_exception
+
+# Type checking import to avoid circular dependencies
+if TYPE_CHECKING:
+    from lightrag.tenant_rag_manager import TenantRAGManager
 
 router = APIRouter(tags=["query"])
 
@@ -77,6 +78,16 @@ class QueryRequest(BaseModel):
         ge=1,
     )
 
+    hl_keywords: list[str] = Field(
+        default_factory=list,
+        description="List of high-level keywords to prioritize in retrieval. Leave empty to use the LLM to generate the keywords.",
+    )
+
+    ll_keywords: list[str] = Field(
+        default_factory=list,
+        description="List of low-level keywords to refine retrieval focus. Leave empty to use the LLM to generate the keywords.",
+    )
+
     conversation_history: Optional[List[Dict[str, Any]]] = Field(
         default=None,
         description="Stores past conversation history to maintain context. Format: [{'role': 'user/assistant', 'content': 'message'}].",
@@ -95,6 +106,11 @@ class QueryRequest(BaseModel):
     include_references: Optional[bool] = Field(
         default=True,
         description="If True, includes reference list in responses. Affects /query and /query/stream endpoints. /query/data always includes references.",
+    )
+
+    include_chunk_content: Optional[bool] = Field(
+        default=False,
+        description="If True, includes actual chunk text content in references. Only applies when include_references=True. Useful for evaluation and debugging.",
     )
 
     stream: Optional[bool] = Field(
@@ -124,7 +140,10 @@ class QueryRequest(BaseModel):
     def to_query_params(self, is_stream: bool) -> "QueryParam":
         """Converts a QueryRequest instance into a QueryParam instance."""
         # Use Pydantic's `.model_dump(exclude_none=True)` to remove None values automatically
-        request_data = self.model_dump(exclude_none=True, exclude={"query"})
+        # Exclude API-level parameters that don't belong in QueryParam
+        request_data = self.model_dump(
+            exclude_none=True, exclude={"query", "include_chunk_content"}
+        )
 
         # Ensure `mode` and `stream` are set explicitly
         param = QueryParam(**request_data)
@@ -168,37 +187,50 @@ class StreamChunkResponse(BaseModel):
     )
 
 
-def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag_manager: Optional[TenantRAGManager] = None):
+def create_query_routes(
+    rag: LightRAG,
+    api_key: Optional[str] = None,
+    top_k: int = 60,
+    rag_manager: Optional["TenantRAGManager"] = None,
+):
+    """Create query routes with optional multi-tenant support.
+
+    Args:
+        rag: Default/global LightRAG instance
+        api_key: Optional API key for authentication
+        top_k: Default top_k value for queries
+        rag_manager: Optional TenantRAGManager for multi-tenant mode
+    """
+    # Import here to avoid circular dependencies
+    from lightrag.api.dependencies import get_tenant_context_optional
+    from lightrag.models.tenant import TenantContext
+
     combined_auth = get_combined_auth_dependency(api_key)
-    
-    # SEC-001 FIX: Check strict mode configuration
-    try:
-        from lightrag.api.config import MULTI_TENANT_STRICT_MODE
-        strict_mode = MULTI_TENANT_STRICT_MODE
-    except ImportError:
-        strict_mode = False
-    
-    async def get_tenant_rag(tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional)) -> LightRAG:
+
+    async def get_tenant_rag(
+        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional),
+    ) -> LightRAG:
         """Dependency to get tenant-specific RAG instance for query operations.
-        
-        In strict multi-tenant mode, raises error if tenant context is missing.
-        In non-strict mode, falls back to global RAG for backward compatibility.
+
+        In multi-tenant mode (when rag_manager is provided), returns tenant-specific RAG.
+        Otherwise, falls back to the global RAG instance.
         """
-        if rag_manager and tenant_context and tenant_context.tenant_id and tenant_context.kb_id:
-            return await rag_manager.get_rag_instance(
-                tenant_context.tenant_id, 
-                tenant_context.kb_id,
-                tenant_context.user_id  # Pass user_id for security validation
-            )
-        
-        # SEC-001 FIX: In strict mode, don't allow fallback to global RAG
-        if strict_mode and rag_manager:
-            from fastapi import HTTPException
-            raise HTTPException(
-                status_code=400,
-                detail="Tenant context required. Provide X-Tenant-ID and X-KB-ID headers."
-            )
-        
+        if (
+            rag_manager
+            and tenant_context
+            and tenant_context.tenant_id
+            and tenant_context.kb_id
+        ):
+            try:
+                return await rag_manager.get_rag_instance(
+                    tenant_context.tenant_id,
+                    tenant_context.kb_id,
+                    tenant_context.user_id,
+                )
+            except Exception as e:
+                logging.warning(
+                    f"Failed to get tenant RAG instance: {e}, falling back to global"
+                )
         return rag
 
     @router.post(
@@ -245,6 +277,25 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
                                         {
                                             "reference_id": "2",
                                             "file_path": "/documents/machine_learning.txt",
+                                        },
+                                    ],
+                                },
+                            },
+                            "with_chunk_content": {
+                                "summary": "Response with chunk content",
+                                "description": "Example response when include_references=True and include_chunk_content=True",
+                                "value": {
+                                    "response": "Artificial Intelligence (AI) is a branch of computer science that aims to create intelligent machines capable of performing tasks that typically require human intelligence, such as learning, reasoning, and problem-solving.",
+                                    "references": [
+                                        {
+                                            "reference_id": "1",
+                                            "file_path": "/documents/ai_overview.pdf",
+                                            "content": "Artificial Intelligence (AI) represents a transformative field in computer science focused on creating systems that can perform tasks requiring human-like intelligence. These tasks include learning from experience, understanding natural language, recognizing patterns, and making decisions.",
+                                        },
+                                        {
+                                            "reference_id": "2",
+                                            "file_path": "/documents/machine_learning.txt",
+                                            "content": "Machine learning is a subset of AI that enables computers to learn and improve from experience without being explicitly programmed. It focuses on the development of algorithms that can access data and use it to learn for themselves.",
                                         },
                                     ],
                                 },
@@ -303,8 +354,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
     )
     async def query_text(
         request: QueryRequest,
-        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional),
-        tenant_rag: LightRAG = Depends(get_tenant_rag)
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
     ):
         """
         Comprehensive RAG query endpoint with non-streaming response. Parameter "stream" is ignored.
@@ -328,6 +378,16 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
         ```json
         {
             "query": "What is machine learning?",
+            "mode": "mix"
+        }
+        ```
+
+        Bypass initial LLM call by providing high-level and low-level keywords:
+        ```json
+        {
+            "query": "What is Retrieval-Augmented-Generation?",
+            "hl_keywords": ["machine learning", "information retrieval", "natural language processing"],
+            "ll_keywords": ["retrieval augmented generation", "RAG", "knowledge base"],
             "mode": "mix"
         }
         ```
@@ -386,12 +446,35 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
 
             # Extract LLM response and references from unified result
             llm_response = result.get("llm_response", {})
-            references = result.get("data", {}).get("references", [])
+            data = result.get("data", {})
+            references = data.get("references", [])
 
             # Get the non-streaming response content
             response_content = llm_response.get("content", "")
             if not response_content:
                 response_content = "No relevant context found for the query."
+
+            # Enrich references with chunk content if requested
+            if request.include_references and request.include_chunk_content:
+                chunks = data.get("chunks", [])
+                # Create a mapping from reference_id to chunk content
+                ref_id_to_content = {}
+                for chunk in chunks:
+                    ref_id = chunk.get("reference_id", "")
+                    content = chunk.get("content", "")
+                    if ref_id and content:
+                        # Collect chunk content; join later to avoid quadratic string concatenation
+                        ref_id_to_content.setdefault(ref_id, []).append(content)
+
+                # Add content to references
+                enriched_references = []
+                for ref in references:
+                    ref_copy = ref.copy()
+                    ref_id = ref.get("reference_id", "")
+                    if ref_id in ref_id_to_content:
+                        ref_copy["content"] = "\n\n".join(ref_id_to_content[ref_id])
+                    enriched_references.append(ref_copy)
+                references = enriched_references
 
             # Return response with or without references based on request
             if request.include_references:
@@ -478,8 +561,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
     )
     async def query_text_stream(
         request: QueryRequest,
-        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional),
-        tenant_rag: LightRAG = Depends(get_tenant_rag)
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
     ):
         """
         Advanced RAG query endpoint with flexible streaming response.
@@ -521,6 +603,16 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
             "mode": "mix",
             "stream": true,
             "include_references": true
+        }
+        ```
+
+        Bypass initial LLM call by providing high-level and low-level keywords:
+        ```json
+        {
+            "query": "What is Retrieval-Augmented-Generation?",
+            "hl_keywords": ["machine learning", "information retrieval", "natural language processing"],
+            "ll_keywords": ["retrieval augmented generation", "RAG", "knowledge base"],
+            "mode": "mix"
         }
         ```
 
@@ -951,8 +1043,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
     )
     async def query_data(
         request: QueryRequest,
-        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional),
-        tenant_rag: LightRAG = Depends(get_tenant_rag)
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
     ):
         """
         Advanced data retrieval endpoint for structured RAG analysis.
@@ -1011,6 +1102,16 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60, rag
             "query": "neural network architectures",
             "mode": "naive",
             "chunk_top_k": 5
+        }
+        ```
+
+        Bypass initial LLM call by providing high-level and low-level keywords:
+        ```json
+        {
+            "query": "What is Retrieval-Augmented-Generation?",
+            "hl_keywords": ["machine learning", "information retrieval", "natural language processing"],
+            "ll_keywords": ["retrieval augmented generation", "RAG", "knowledge base"],
+            "mode": "mix"
         }
         ```
 

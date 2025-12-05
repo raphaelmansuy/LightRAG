@@ -19,7 +19,6 @@ from typing import (
 from .utils import EmbeddingFunc
 from .types import KnowledgeGraph
 from .constants import (
-    GRAPH_FIELD_SEP,
     DEFAULT_TOP_K,
     DEFAULT_CHUNK_TOP_K,
     DEFAULT_MAX_ENTITY_TOKENS,
@@ -175,10 +174,6 @@ class StorageNameSpace(ABC):
     namespace: str
     workspace: str
     global_config: dict[str, Any]
-    tenant_id: Optional[str] = None
-    """Optional tenant ID for multi-tenant deployments. Set by subclasses."""
-    kb_id: Optional[str] = None
-    """Optional knowledge base ID for multi-tenant deployments. Set by subclasses."""
 
     async def initialize(self):
         """Initialize the storage"""
@@ -187,25 +182,6 @@ class StorageNameSpace(ABC):
     async def finalize(self):
         """Finalize the storage"""
         pass
-    
-    def _get_composite_workspace(self) -> str:
-        """Get the composite workspace namespace for multi-tenant isolation.
-        
-        Returns the workspace with tenant/kb prefix if multi-tenancy is enabled (tenant_id is set).
-        Otherwise returns the regular workspace for backward compatibility.
-        
-        Returns:
-            str: Composite workspace identifier in format "tenant_id:kb_id:workspace" for multi-tenant,
-                 or just "workspace" for single-tenant/legacy mode
-        """
-        tenant_id = getattr(self, 'tenant_id', None)
-        kb_id = getattr(self, 'kb_id', None)
-        
-        if tenant_id and kb_id:
-            return f"{tenant_id}:{kb_id}:{self.workspace}"
-        elif tenant_id:
-            return f"{tenant_id}:{self.workspace}"
-        return self.workspace
 
     @abstractmethod
     async def index_done_callback(self) -> None:
@@ -240,7 +216,7 @@ class StorageNameSpace(ABC):
 
 @dataclass
 class BaseVectorStorage(StorageNameSpace, ABC):
-    embedding_func: EmbeddingFunc = None
+    embedding_func: EmbeddingFunc
     cosine_better_than_threshold: float = field(default=0.2)
     meta_fields: set[str] = field(default_factory=set)
 
@@ -340,7 +316,7 @@ class BaseVectorStorage(StorageNameSpace, ABC):
 
 @dataclass
 class BaseKVStorage(StorageNameSpace, ABC):
-    embedding_func: EmbeddingFunc = None
+    embedding_func: EmbeddingFunc
 
     @abstractmethod
     async def get_by_id(self, id: str) -> dict[str, Any] | None:
@@ -378,12 +354,20 @@ class BaseKVStorage(StorageNameSpace, ABC):
             None
         """
 
+    @abstractmethod
+    async def is_empty(self) -> bool:
+        """Check if the storage is empty
+
+        Returns:
+            bool: True if storage contains no data, False otherwise
+        """
+
 
 @dataclass
 class BaseGraphStorage(StorageNameSpace, ABC):
     """All operations related to edges in graph should be undirected."""
 
-    embedding_func: EmbeddingFunc = None
+    embedding_func: EmbeddingFunc
 
     @abstractmethod
     async def has_node(self, node_id: str) -> bool:
@@ -544,56 +528,6 @@ class BaseGraphStorage(StorageNameSpace, ABC):
         return result
 
     @abstractmethod
-    async def get_nodes_by_chunk_ids(self, chunk_ids: list[str]) -> list[dict]:
-        """Get all nodes that are associated with the given chunk_ids.
-
-        Args:
-            chunk_ids (list[str]): A list of chunk IDs to find associated nodes for.
-
-        Returns:
-            list[dict]: A list of nodes, where each node is a dictionary of its properties.
-                        An empty list if no matching nodes are found.
-        """
-
-    @abstractmethod
-    async def get_edges_by_chunk_ids(self, chunk_ids: list[str]) -> list[dict]:
-        """Get all edges that are associated with the given chunk_ids.
-
-        Args:
-            chunk_ids (list[str]): A list of chunk IDs to find associated edges for.
-
-        Returns:
-            list[dict]: A list of edges, where each edge is a dictionary of its properties.
-                        An empty list if no matching edges are found.
-        """
-        # Default implementation iterates through all nodes and their edges, which is inefficient.
-        # This method should be overridden by subclasses for better performance.
-        all_edges = []
-        all_labels = await self.get_all_labels()
-        processed_edges = set()
-
-        for label in all_labels:
-            edges = await self.get_node_edges(label)
-            if edges:
-                for src_id, tgt_id in edges:
-                    # Avoid processing the same edge twice in an undirected graph
-                    edge_tuple = tuple(sorted((src_id, tgt_id)))
-                    if edge_tuple in processed_edges:
-                        continue
-                    processed_edges.add(edge_tuple)
-
-                    edge = await self.get_edge(src_id, tgt_id)
-                    if edge and "source_id" in edge:
-                        source_ids = set(edge["source_id"].split(GRAPH_FIELD_SEP))
-                        if not source_ids.isdisjoint(chunk_ids):
-                            # Add source and target to the edge dict for easier processing later
-                            edge_with_nodes = edge.copy()
-                            edge_with_nodes["source"] = src_id
-                            edge_with_nodes["target"] = tgt_id
-                            all_edges.append(edge_with_nodes)
-        return all_edges
-
-    @abstractmethod
     async def upsert_node(self, node_id: str, node_data: dict[str, str]) -> None:
         """Insert a new node or update an existing node in the graph.
 
@@ -735,6 +669,7 @@ class DocStatus(str, Enum):
 
     PENDING = "pending"
     PROCESSING = "processing"
+    PREPROCESSED = "preprocessed"
     PROCESSED = "processed"
     FAILED = "failed"
 
@@ -765,6 +700,25 @@ class DocProcessingStatus:
     """Error message if failed"""
     metadata: dict[str, Any] = field(default_factory=dict)
     """Additional metadata"""
+    multimodal_processed: bool | None = field(default=None, repr=False)
+    """Internal field: indicates if multimodal processing is complete. Not shown in repr() but accessible for debugging."""
+
+    def __post_init__(self):
+        """
+        Handle status conversion based on multimodal_processed field.
+
+        Business rules:
+        - If multimodal_processed is False and status is PROCESSED,
+          then change status to PREPROCESSED
+        - The multimodal_processed field is kept (with repr=False) for internal use and debugging
+        """
+        # Apply status conversion logic
+        if self.multimodal_processed is not None:
+            if (
+                self.multimodal_processed is False
+                and self.status == DocStatus.PROCESSED
+            ):
+                self.status = DocStatus.PREPROCESSED
 
 
 @dataclass
@@ -828,34 +782,6 @@ class DocStatusStorage(BaseKVStorage, ABC):
             dict[str, Any] | None: Document data if found, None otherwise
             Returns the same format as get_by_ids method
         """
-
-    async def get_doc_by_external_id(self, external_id: str) -> dict[str, Any] | None:
-        """Get document by external_id for idempotency support.
-        
-        This method searches for a document with the given external_id.
-        Default implementation scans all documents; storage backends should
-        override this with an optimized implementation using indexes.
-
-        Args:
-            external_id: The external unique identifier to search for
-
-        Returns:
-            dict[str, Any] | None: Document data if found, None otherwise
-            Returns the same format as get_by_ids method
-        """
-        # Default implementation - scan all documents
-        # Storage backends should override with optimized indexed lookup
-        try:
-            all_docs = await self.get_all()
-            if all_docs:
-                for doc_id, doc_data in all_docs.items():
-                    if isinstance(doc_data, dict):
-                        metadata = doc_data.get("metadata", {})
-                        if isinstance(metadata, dict) and metadata.get("external_id") == external_id:
-                            return {"id": doc_id, **doc_data}
-        except Exception:
-            pass
-        return None
 
 
 class StoragesStatus(str, Enum):

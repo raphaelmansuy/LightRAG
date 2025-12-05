@@ -45,7 +45,13 @@ export type MessageWithError = Message & {
 }
 
 // Restore original component definition and export
-export const ChatMessage = ({ message }: { message: MessageWithError }) => { // Remove isComplete prop
+export const ChatMessage = ({
+  message,
+  isTabActive = true
+}: {
+  message: MessageWithError
+  isTabActive?: boolean
+}) => {
   const { t } = useTranslation()
   const { theme } = useTheme()
   const [katexPlugin, setKatexPlugin] = useState<((options?: KaTeXOptions) => any) | null>(null)
@@ -70,10 +76,16 @@ export const ChatMessage = ({ message }: { message: MessageWithError }) => { // 
     ? message.content
     : (displayContent !== undefined ? displayContent : (message.content || ''))
 
-  // Load KaTeX dynamically
+  // Load KaTeX dynamically with extensions
   useEffect(() => {
     const loadKaTeX = async () => {
       try {
+        // Load KaTeX extensions (must be loaded before rehype-katex)
+        // 1. mhchem: enables \ce and \pu commands for chemistry formulas
+        await import('katex/contrib/mhchem');
+        // 2. copy-tex: allows users to copy rendered formulas as LaTeX source code
+        await import('katex/contrib/copy-tex');
+        // Then load rehype-katex
         const { default: rehypeKatex } = await import('rehype-katex');
         setKatexPlugin(() => rehypeKatex);
       } catch (error) {
@@ -148,8 +160,13 @@ export const ChatMessage = ({ message }: { message: MessageWithError }) => { // 
       } rounded-lg px-4 py-2`}
     >
       {/* Thinking process display - only for assistant messages */}
+      {/* Always render to prevent layout shift when switching tabs */}
       {message.role === 'assistant' && (isThinking || thinkingTime !== null) && (
-        <div className="mb-2">
+        <div className={cn(
+          'mb-2',
+          // Reduce visual priority in inactive tabs while maintaining layout
+          !isTabActive && 'opacity-50'
+        )}>
           <div
             className="flex items-center text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors duration-200 text-sm cursor-pointer select-none"
             onClick={() => {
@@ -161,7 +178,8 @@ export const ChatMessage = ({ message }: { message: MessageWithError }) => { // 
           >
             {isThinking ? (
               <>
-                <LoaderIcon className="mr-2 size-4 animate-spin" />
+                {/* Only show spinner animation in active tab to save resources */}
+                {isTabActive && <LoaderIcon className="mr-2 size-4 animate-spin" />}
                 <span>{t('retrievePanel.chatMessage.thinking')}</span>
               </>
             ) : (
@@ -247,11 +265,12 @@ export const ChatMessage = ({ message }: { message: MessageWithError }) => { // 
           </ReactMarkdown>
         </div>
       )}
-      {(() => {
+      {/* Loading indicator - only show in active tab */}
+      {isTabActive && (() => {
         // More comprehensive loading state check
         const hasVisibleContent = finalDisplayContent && finalDisplayContent.trim() !== '';
         const isLoadingState = !hasVisibleContent && !isThinking && !thinkingTime;
-        return isLoadingState && <LoaderIcon className="animate-spin duration-2000" />;
+        return isLoadingState && <LoaderIcon className="animate-spin duration-2000" />
       })()}
     </div>
   )

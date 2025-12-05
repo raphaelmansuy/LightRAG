@@ -57,11 +57,17 @@ function TabsNavigation() {
 
 export default function SiteHeader() {
   const { t } = useTranslation()
-  const { isGuestMode, coreVersion, apiVersion, username, webuiTitle, webuiDescription } = useAuthStore()
+  const { isGuestMode, coreVersion, apiVersion, username, webuiTitle, webuiDescription, multiTenantEnabled } = useAuthStore()
 
   const versionDisplay = (coreVersion && apiVersion)
     ? `${coreVersion}/${apiVersion}`
     : null;
+
+  // Check if frontend needs rebuild (apiVersion ends with warning symbol)
+  const hasWarning = apiVersion?.endsWith('⚠️');
+  const versionTooltip = hasWarning
+    ? t('header.frontendNeedsRebuild')
+    : versionDisplay ? `v${versionDisplay}` : '';
 
   const handleLogout = () => {
     navigationService.navigateToLogin();
@@ -95,10 +101,12 @@ export default function SiteHeader() {
         )}
       </div>
 
-      {/* Tenant and KB Selection - More Prominent */}
-      <div className="shrink-0">
-        <TenantSelector hideTenantSelect />
-      </div>
+      {/* Tenant and KB Selection - Only show in multi-tenant mode */}
+      {multiTenantEnabled && (
+        <div className="shrink-0">
+          <TenantSelector hideTenantSelect />
+        </div>
+      )}
 
       <div className="flex-1 flex items-center justify-center gap-4 min-w-0">
         <TabsNavigation />
@@ -112,9 +120,18 @@ export default function SiteHeader() {
       <nav className="w-[200px] flex items-center justify-end shrink-0">
         <div className="flex items-center gap-2">
           {versionDisplay && (
-            <span className="text-xs text-gray-500 dark:text-gray-400 mr-1">
-              v{versionDisplay}
-            </span>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="text-xs text-gray-500 dark:text-gray-400 mr-1 cursor-default">
+                    v{versionDisplay}
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  {versionTooltip}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           )}
           <Button variant="ghost" size="icon" side="bottom" tooltip={t('header.projectRepository')}>
             <a href={SiteInfo.github} target="_blank" rel="noopener noreferrer">

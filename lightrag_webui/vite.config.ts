@@ -1,82 +1,107 @@
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import path from 'path'
 import react from '@vitejs/plugin-react-swc'
 import tailwindcss from '@tailwindcss/vite'
 
-// Get the base URL from environment or default to /
-const getBaseUrl = (): string => {
-  return process.env.VITE_BASE_URL || '/'
-}
+// WebUI base path - must match the value in src/lib/constants.ts
+const webuiPrefix = '/webui/'
 
 // https://vite.dev/config/
-export default defineConfig({
-  plugins: [react(), tailwindcss()],
-  resolve: {
-    alias: {
-      '@': path.resolve(__dirname, './src')
-    }
-  },
-  base: getBaseUrl(),
-  build: {
-    outDir: 'dist',
-    emptyOutDir: true,
-    chunkSizeWarningLimit: 1000,
-    rollupOptions: {
-      // Handle circular dependencies and module initialization
-      external: [],
-      output: {
-        // Manual chunking strategy
-        manualChunks: {
-          // Group React-related libraries into one chunk
-          'react-vendor': ['react', 'react-dom', 'react-router-dom'],
-          // Group graph visualization libraries into one chunk
-          'graph-vendor': ['sigma', 'graphology', '@react-sigma/core'],
-          // Group UI component libraries into one chunk
-          'ui-vendor': ['@radix-ui/react-dialog', '@radix-ui/react-popover', '@radix-ui/react-select', '@radix-ui/react-tabs'],
-          // Group utility libraries into one chunk
-          'utils-vendor': ['axios', 'i18next', 'zustand', 'clsx', 'tailwind-merge'],
-          // Separate feature modules
-          'feature-graph': ['./src/features/GraphViewer'],
-          'feature-documents': ['./src/features/DocumentManager'],
-          'feature-retrieval': ['./src/features/RetrievalTesting'],
+export default defineConfig(({ mode }) => {
+  // Load env file based on `mode` in the current working directory.
+  const env = loadEnv(mode, process.cwd(), '')
 
-          // Mermaid-related modules
-          'mermaid-vendor': ['mermaid'],
+  // Backend URL for API proxy (default to local dev server)
+  // Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
+  const backendUrl = env.VITE_BACKEND_URL || 'http://127.0.0.1:9621'
 
-          // Markdown-related modules
-          'markdown-vendor': [
-            'react-markdown',
-            'rehype-react',
-            'rehype-raw',
-            'remark-gfm',
-            'remark-math',
-            'react-syntax-highlighter',
-            'unist-util-visit'
-          ]
+  return {
+    plugins: [react(), tailwindcss()],
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, './src')
+      }
+    },
+    // base: import.meta.env.VITE_BASE_URL || '/webui/',
+    base: webuiPrefix,
+    build: {
+      outDir: path.resolve(__dirname, '../lightrag/api/webui'),
+      emptyOutDir: true,
+      chunkSizeWarningLimit: 3800,
+      rollupOptions: {
+        // Let Vite handle chunking automatically to avoid circular dependency issues
+        output: {
+          // Ensure consistent chunk naming format
+          chunkFileNames: 'assets/[name]-[hash].js',
+          // Entry file naming format
+          entryFileNames: 'assets/[name]-[hash].js',
+          // Asset file naming format
+          assetFileNames: 'assets/[name]-[hash].[ext]'
+        }
+      }
+    },
+    server: {
+      // Proxy all API routes to the backend during development
+      proxy: {
+        // API v1 routes (tenant management, knowledge bases, etc.)
+        '/api/v1': {
+          target: backendUrl,
+          changeOrigin: true,
         },
-        // Ensure consistent chunk naming format
-        chunkFileNames: 'assets/[name]-[hash].js',
-        // Entry file naming format
-        entryFileNames: 'assets/[name]-[hash].js',
-        // Asset file naming format
-        assetFileNames: 'assets/[name]-[hash].[ext]'
+        // Legacy API routes (chat, generate, tags, etc.)
+        '/api': {
+          target: backendUrl,
+          changeOrigin: true,
+        },
+        // Document operations
+        '/documents': {
+          target: backendUrl,
+          changeOrigin: true,
+        },
+        // Query operations
+        '/query': {
+          target: backendUrl,
+          changeOrigin: true,
+        },
+        // Graph operations
+        '/graph': {
+          target: backendUrl,
+          changeOrigin: true,
+        },
+        // Retrieval operations
+        '/retrieval': {
+          target: backendUrl,
+          changeOrigin: true,
+        },
+        // Health check
+        '/health': {
+          target: backendUrl,
+          changeOrigin: true,
+        },
+        // Authentication status
+        '/auth-status': {
+          target: backendUrl,
+          changeOrigin: true,
+        },
+        // OpenAPI docs
+        '/docs': {
+          target: backendUrl,
+          changeOrigin: true,
+        },
+        '/redoc': {
+          target: backendUrl,
+          changeOrigin: true,
+        },
+        '/openapi.json': {
+          target: backendUrl,
+          changeOrigin: true,
+        },
+        // Static assets for Swagger UI
+        '/static': {
+          target: backendUrl,
+          changeOrigin: true,
+        },
       }
     }
-  },
-  server: {
-    proxy: process.env.VITE_API_PROXY === 'true' && process.env.VITE_API_ENDPOINTS ?
-      Object.fromEntries(
-        process.env.VITE_API_ENDPOINTS.split(',').map(endpoint => [
-          endpoint,
-          {
-            target: process.env.VITE_BACKEND_URL || 'http://localhost:9621',
-            changeOrigin: true,
-            rewrite: endpoint === '/api' ?
-              (path) => path.replace(/^\/api/, '') :
-              endpoint === '/docs' || endpoint === '/openapi.json' ?
-                (path) => path : undefined
-          }
-        ])
-      ) : {}
   }
 })

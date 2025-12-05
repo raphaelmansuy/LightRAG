@@ -3,14 +3,15 @@ This module contains all document-related routes for the LightRAG API.
 """
 
 import asyncio
+from functools import lru_cache
 from lightrag.utils import logger, get_pinyin_sort_key
 import aiofiles
 import shutil
 import traceback
-import pipmaster as pm
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Literal
+from typing import Dict, List, Optional, Any, Literal, TYPE_CHECKING
+from io import BytesIO
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -23,12 +24,35 @@ from pydantic import BaseModel, Field, field_validator
 
 from lightrag import LightRAG
 from lightrag.base import DeletionResult, DocProcessingStatus, DocStatus
-from lightrag.utils import generate_track_id
+from lightrag.utils import (
+    generate_track_id,
+    compute_mdhash_id,
+    sanitize_text_for_encoding,
+)
 from lightrag.api.utils_api import get_combined_auth_dependency
-from lightrag.api.dependencies import get_tenant_context_optional, get_tenant_context
-from lightrag.models.tenant import TenantContext
-from lightrag.tenant_rag_manager import TenantRAGManager
 from ..config import global_args
+
+# Type checking import to avoid circular dependencies
+if TYPE_CHECKING:
+    from lightrag.tenant_rag_manager import TenantRAGManager
+
+
+@lru_cache(maxsize=1)
+def _is_docling_available() -> bool:
+    """Check if docling is available (cached check).
+
+    This function uses lru_cache to avoid repeated import attempts.
+    The result is cached after the first call.
+
+    Returns:
+        bool: True if docling is available, False otherwise
+    """
+    try:
+        import docling  # noqa: F401  # type: ignore[import-not-found]
+
+        return True
+    except ImportError:
+        return False
 
 
 # Function to format datetime to ISO format string with timezone information
@@ -137,15 +161,62 @@ class ScanResponse(BaseModel):
         }
 
 
+class ReprocessResponse(BaseModel):
+    """Response model for reprocessing failed documents operation
+
+    Attributes:
+        status: Status of the reprocessing operation
+        message: Message describing the operation result
+        track_id: Always empty string. Reprocessed documents retain their original track_id.
+    """
+
+    status: Literal["reprocessing_started"] = Field(
+        description="Status of the reprocessing operation"
+    )
+    message: str = Field(description="Human-readable message describing the operation")
+    track_id: str = Field(
+        default="",
+        description="Always empty string. Reprocessed documents retain their original track_id from initial upload.",
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "reprocessing_started",
+                "message": "Reprocessing of failed documents has been initiated in background",
+                "track_id": "",
+            }
+        }
+
+
+class CancelPipelineResponse(BaseModel):
+    """Response model for pipeline cancellation operation
+
+    Attributes:
+        status: Status of the cancellation request
+        message: Message describing the operation result
+    """
+
+    status: Literal["cancellation_requested", "not_busy"] = Field(
+        description="Status of the cancellation request"
+    )
+    message: str = Field(description="Human-readable message describing the operation")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "cancellation_requested",
+                "message": "Pipeline cancellation has been requested. Documents will be marked as FAILED.",
+            }
+        }
+
+
 class InsertTextRequest(BaseModel):
     """Request model for inserting a single text document
 
     Attributes:
         text: The text content to be inserted into the RAG system
         file_source: Source of the text (optional)
-        external_id: External unique identifier for idempotency (optional).
-                     If provided, re-submitting the same external_id will return
-                     the existing document instead of creating a duplicate.
     """
 
     text: str = Field(
@@ -153,12 +224,6 @@ class InsertTextRequest(BaseModel):
         description="The text to insert",
     )
     file_source: str = Field(default=None, min_length=0, description="File Source")
-    external_id: str = Field(
-        default=None,
-        min_length=0,
-        max_length=255,
-        description="External unique identifier for idempotency. If provided and a document with this external_id already exists, the existing document will be returned instead of creating a duplicate.",
-    )
 
     @field_validator("text", mode="after")
     @classmethod
@@ -168,19 +233,13 @@ class InsertTextRequest(BaseModel):
     @field_validator("file_source", mode="after")
     @classmethod
     def strip_source_after(cls, file_source: str) -> str:
-        return file_source.strip() if file_source else file_source
-    
-    @field_validator("external_id", mode="after")
-    @classmethod
-    def strip_external_id_after(cls, external_id: str) -> str:
-        return external_id.strip() if external_id else external_id
+        return file_source.strip()
 
     class Config:
         json_schema_extra = {
             "example": {
                 "text": "This is a sample text to be inserted into the RAG system.",
                 "file_source": "Source of the text (optional)",
-                "external_id": "unique-doc-id-123",
             }
         }
 
@@ -191,9 +250,6 @@ class InsertTextsRequest(BaseModel):
     Attributes:
         texts: List of text contents to be inserted into the RAG system
         file_sources: Sources of the texts (optional)
-        external_ids: List of external unique identifiers for idempotency (optional).
-                      If provided, re-submitting the same external_id will skip that 
-                      document instead of creating a duplicate.
     """
 
     texts: list[str] = Field(
@@ -202,10 +258,6 @@ class InsertTextsRequest(BaseModel):
     )
     file_sources: list[str] = Field(
         default=None, min_length=0, description="Sources of the texts"
-    )
-    external_ids: list[str] = Field(
-        default=None,
-        description="List of external unique identifiers for idempotency. If a document with the same external_id already exists, it will be skipped.",
     )
 
     @field_validator("texts", mode="after")
@@ -216,16 +268,7 @@ class InsertTextsRequest(BaseModel):
     @field_validator("file_sources", mode="after")
     @classmethod
     def strip_sources_after(cls, file_sources: list[str]) -> list[str]:
-        if file_sources is None:
-            return None
         return [file_source.strip() for file_source in file_sources]
-    
-    @field_validator("external_ids", mode="after")
-    @classmethod
-    def strip_external_ids_after(cls, external_ids: list[str]) -> list[str]:
-        if external_ids is None:
-            return None
-        return [ext_id.strip() if ext_id else ext_id for ext_id in external_ids]
 
     class Config:
         json_schema_extra = {
@@ -236,10 +279,6 @@ class InsertTextsRequest(BaseModel):
                 ],
                 "file_sources": [
                     "First file source (optional)",
-                ],
-                "external_ids": [
-                    "unique-doc-1",
-                    "unique-doc-2",
                 ],
             }
         }
@@ -347,6 +386,10 @@ class DeleteDocRequest(BaseModel):
         default=False,
         description="Whether to delete the corresponding file in the upload directory.",
     )
+    delete_llm_cache: bool = Field(
+        default=False,
+        description="Whether to delete cached LLM extraction results for the documents.",
+    )
 
     @field_validator("doc_ids", mode="after")
     @classmethod
@@ -390,6 +433,65 @@ class DeleteRelationRequest(BaseModel):
         return entity_name.strip()
 
 
+class ResetDocumentStatusRequest(BaseModel):
+    """Request model for resetting document status to PENDING for retry.
+
+    Attributes:
+        doc_ids: List of document IDs to reset
+        target_status: The status to reset documents to (default: PENDING)
+    """
+
+    doc_ids: List[str] = Field(..., description="The IDs of the documents to reset.")
+    target_status: Literal["pending", "failed"] = Field(
+        default="pending",
+        description="Target status to set. Use 'pending' for retry, 'failed' to mark as failed.",
+    )
+
+    @field_validator("doc_ids", mode="after")
+    @classmethod
+    def validate_doc_ids(cls, doc_ids: List[str]) -> List[str]:
+        if not doc_ids:
+            raise ValueError("Document IDs list cannot be empty")
+        validated_ids = []
+        for doc_id in doc_ids:
+            if not doc_id or not doc_id.strip():
+                raise ValueError("Document ID cannot be empty")
+            validated_ids.append(doc_id.strip())
+        if len(validated_ids) != len(set(validated_ids)):
+            raise ValueError("Document IDs must be unique")
+        return validated_ids
+
+
+class ResetDocumentStatusResponse(BaseModel):
+    """Response model for reset document status operation.
+
+    Attributes:
+        status: Status of the operation
+        message: Human-readable message
+        reset_count: Number of documents successfully reset
+        failed_ids: List of document IDs that failed to reset
+    """
+
+    status: Literal["success", "partial", "failed"] = Field(
+        description="Status of the reset operation"
+    )
+    message: str = Field(description="Human-readable message describing the operation")
+    reset_count: int = Field(description="Number of documents successfully reset")
+    failed_ids: List[str] = Field(
+        default_factory=list, description="List of document IDs that failed to reset"
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "status": "success",
+                "message": "Successfully reset 2 document(s) to pending status",
+                "reset_count": 2,
+                "failed_ids": [],
+            }
+        }
+
+
 class DocStatusResponse(BaseModel):
     id: str = Field(description="Document identifier")
     content_summary: str = Field(description="Summary of document content")
@@ -409,7 +511,7 @@ class DocStatusResponse(BaseModel):
     metadata: Optional[dict[str, Any]] = Field(
         default=None, description="Additional metadata about the document"
     )
-    file_path: Optional[str] = Field(default=None, description="Path to the document file")
+    file_path: str = Field(description="Path to the document file")
 
     class Config:
         json_schema_extra = {
@@ -417,7 +519,7 @@ class DocStatusResponse(BaseModel):
                 "id": "doc_123456",
                 "content_summary": "Research paper on machine learning",
                 "content_length": 15240,
-                "status": "PROCESSED",
+                "status": "processed",
                 "created_at": "2025-03-31T12:34:56",
                 "updated_at": "2025-03-31T12:35:30",
                 "track_id": "upload_20250729_170612_abc123",
@@ -450,7 +552,7 @@ class DocsStatusesResponse(BaseModel):
                             "id": "doc_123",
                             "content_summary": "Pending document",
                             "content_length": 5000,
-                            "status": "PENDING",
+                            "status": "pending",
                             "created_at": "2025-03-31T10:00:00",
                             "updated_at": "2025-03-31T10:00:00",
                             "track_id": "upload_20250331_100000_abc123",
@@ -460,12 +562,27 @@ class DocsStatusesResponse(BaseModel):
                             "file_path": "pending_doc.pdf",
                         }
                     ],
+                    "PREPROCESSED": [
+                        {
+                            "id": "doc_789",
+                            "content_summary": "Document pending final indexing",
+                            "content_length": 7200,
+                            "status": "preprocessed",
+                            "created_at": "2025-03-31T09:30:00",
+                            "updated_at": "2025-03-31T09:35:00",
+                            "track_id": "upload_20250331_093000_xyz789",
+                            "chunks_count": 10,
+                            "error": None,
+                            "metadata": None,
+                            "file_path": "preprocessed_doc.pdf",
+                        }
+                    ],
                     "PROCESSED": [
                         {
                             "id": "doc_456",
                             "content_summary": "Processed document",
                             "content_length": 8000,
-                            "status": "PROCESSED",
+                            "status": "processed",
                             "created_at": "2025-03-31T09:00:00",
                             "updated_at": "2025-03-31T09:05:00",
                             "track_id": "insert_20250331_090000_def456",
@@ -637,6 +754,7 @@ class PaginatedDocsResponse(BaseModel):
                 "status_counts": {
                     "PENDING": 10,
                     "PROCESSING": 5,
+                    "PREPROCESSED": 5,
                     "PROCESSED": 130,
                     "FAILED": 5,
                 },
@@ -659,6 +777,7 @@ class StatusCountsResponse(BaseModel):
                 "status_counts": {
                     "PENDING": 10,
                     "PROCESSING": 5,
+                    "PREPROCESSED": 5,
                     "PROCESSED": 130,
                     "FAILED": 5,
                 }
@@ -847,7 +966,6 @@ def get_unique_filename_in_enqueued(target_dir: Path, original_name: str) -> str
     Returns:
         str: Unique filename (may have numeric suffix added)
     """
-    from pathlib import Path
     import time
 
     original_path = Path(original_name)
@@ -868,6 +986,270 @@ def get_unique_filename_in_enqueued(target_dir: Path, original_name: str) -> str
     # Fallback with timestamp if all 999 slots are taken
     timestamp = int(time.time())
     return f"{base_name}_{timestamp}{extension}"
+
+
+# Document processing helper functions (synchronous)
+# These functions run in thread pool via asyncio.to_thread() to avoid blocking the event loop
+
+
+def _convert_with_docling(file_path: Path) -> str:
+    """Convert document using docling (synchronous).
+
+    Args:
+        file_path: Path to the document file
+
+    Returns:
+        str: Extracted markdown content
+    """
+    from docling.document_converter import DocumentConverter  # type: ignore
+
+    converter = DocumentConverter()
+    result = converter.convert(file_path)
+    return result.document.export_to_markdown()
+
+
+def _extract_pdf_pypdf(file_bytes: bytes, password: str = None) -> str:
+    """Extract PDF content using pypdf (synchronous).
+
+    Args:
+        file_bytes: PDF file content as bytes
+        password: Optional password for encrypted PDFs
+
+    Returns:
+        str: Extracted text content
+
+    Raises:
+        Exception: If PDF is encrypted and password is incorrect or missing
+    """
+    from pypdf import PdfReader  # type: ignore
+
+    pdf_file = BytesIO(file_bytes)
+    reader = PdfReader(pdf_file)
+
+    # Check if PDF is encrypted
+    if reader.is_encrypted:
+        if not password:
+            raise Exception("PDF is encrypted but no password provided")
+
+        decrypt_result = reader.decrypt(password)
+        if decrypt_result == 0:
+            raise Exception("Incorrect PDF password")
+
+    # Extract text from all pages
+    content = ""
+    for page in reader.pages:
+        content += page.extract_text() + "\n"
+
+    return content
+
+
+def _extract_docx(file_bytes: bytes) -> str:
+    """Extract DOCX content including tables in document order (synchronous).
+
+    Args:
+        file_bytes: DOCX file content as bytes
+
+    Returns:
+        str: Extracted text content with tables in their original positions.
+             Tables are separated from paragraphs with blank lines for clarity.
+    """
+    from docx import Document  # type: ignore
+    from docx.table import Table  # type: ignore
+    from docx.text.paragraph import Paragraph  # type: ignore
+
+    docx_file = BytesIO(file_bytes)
+    doc = Document(docx_file)
+
+    def escape_cell(cell_value: str | None) -> str:
+        """Escape characters that would break tab-delimited layout.
+
+        Escape order is critical: backslashes first, then tabs/newlines.
+        This prevents double-escaping issues.
+
+        Args:
+            cell_value: The cell value to escape (can be None or str)
+
+        Returns:
+            str: Escaped cell value safe for tab-delimited format
+        """
+        if cell_value is None:
+            return ""
+        text = str(cell_value)
+        # CRITICAL: Escape backslash first to avoid double-escaping
+        return (
+            text.replace("\\", "\\\\")  # Must be first: \ -> \\
+            .replace("\t", "\\t")  # Tab -> \t (visible)
+            .replace("\r\n", "\\n")  # Windows newline -> \n
+            .replace("\r", "\\n")  # Mac newline -> \n
+            .replace("\n", "\\n")  # Unix newline -> \n
+        )
+
+    content_parts = []
+    in_table = False  # Track if we're currently processing a table
+
+    # Iterate through all body elements in document order
+    for element in doc.element.body:
+        # Check if element is a paragraph
+        if element.tag.endswith("p"):
+            # If coming out of a table, add blank line after table
+            if in_table:
+                content_parts.append("")  # Blank line after table
+                in_table = False
+
+            paragraph = Paragraph(element, doc)
+            text = paragraph.text
+            # Always append to preserve document spacing (including blank paragraphs)
+            content_parts.append(text)
+
+        # Check if element is a table
+        elif element.tag.endswith("tbl"):
+            # Add blank line before table (if content exists)
+            if content_parts and not in_table:
+                content_parts.append("")  # Blank line before table
+
+            in_table = True
+            table = Table(element, doc)
+            for row in table.rows:
+                row_text = []
+                for cell in row.cells:
+                    cell_text = cell.text
+                    # Escape special characters to preserve tab-delimited structure
+                    row_text.append(escape_cell(cell_text))
+                # Only add row if at least one cell has content
+                if any(cell for cell in row_text):
+                    content_parts.append("\t".join(row_text))
+
+    return "\n".join(content_parts)
+
+
+def _extract_pptx(file_bytes: bytes) -> str:
+    """Extract PPTX content (synchronous).
+
+    Args:
+        file_bytes: PPTX file content as bytes
+
+    Returns:
+        str: Extracted text content
+    """
+    from pptx import Presentation  # type: ignore
+
+    pptx_file = BytesIO(file_bytes)
+    prs = Presentation(pptx_file)
+    content = ""
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if hasattr(shape, "text"):
+                content += shape.text + "\n"
+    return content
+
+
+def _extract_xlsx(file_bytes: bytes) -> str:
+    """Extract XLSX content in tab-delimited format with clear sheet separation.
+
+    This function processes Excel workbooks and converts them to a structured text format
+    suitable for LLM prompts and RAG systems. Each sheet is clearly delimited with
+    separator lines, and special characters are escaped to preserve the tab-delimited structure.
+
+    Features:
+    - Each sheet is wrapped with '====================' separators for visual distinction
+    - Special characters (tabs, newlines, backslashes) are escaped to prevent structure corruption
+    - Column alignment is preserved across all rows to maintain tabular structure
+    - Empty rows are preserved as blank lines to maintain row structure
+    - Uses sheet.max_column to determine column width efficiently
+
+    Args:
+        file_bytes: XLSX file content as bytes
+
+    Returns:
+        str: Extracted text content with all sheets in tab-delimited format.
+             Format: Sheet separators, sheet name, then tab-delimited rows.
+
+    Example output:
+        ==================== Sheet: Data ====================
+        Name\tAge\tCity
+        Alice\t30\tNew York
+        Bob\t25\tLondon
+
+        ==================== Sheet: Summary ====================
+        Total\t2
+        ====================
+    """
+    from openpyxl import load_workbook  # type: ignore
+
+    xlsx_file = BytesIO(file_bytes)
+    wb = load_workbook(xlsx_file)
+
+    def escape_cell(cell_value: str | int | float | None) -> str:
+        """Escape characters that would break tab-delimited layout.
+
+        Escape order is critical: backslashes first, then tabs/newlines.
+        This prevents double-escaping issues.
+
+        Args:
+            cell_value: The cell value to escape (can be None, str, int, or float)
+
+        Returns:
+            str: Escaped cell value safe for tab-delimited format
+        """
+        if cell_value is None:
+            return ""
+        text = str(cell_value)
+        # CRITICAL: Escape backslash first to avoid double-escaping
+        return (
+            text.replace("\\", "\\\\")  # Must be first: \ -> \\
+            .replace("\t", "\\t")  # Tab -> \t (visible)
+            .replace("\r\n", "\\n")  # Windows newline -> \n
+            .replace("\r", "\\n")  # Mac newline -> \n
+            .replace("\n", "\\n")  # Unix newline -> \n
+        )
+
+    def escape_sheet_title(title: str) -> str:
+        """Escape sheet title to prevent formatting issues in separators.
+
+        Args:
+            title: Original sheet title
+
+        Returns:
+            str: Sanitized sheet title with tabs/newlines replaced
+        """
+        return str(title).replace("\n", " ").replace("\t", " ").replace("\r", " ")
+
+    content_parts: list[str] = []
+    sheet_separator = "=" * 20
+
+    for idx, sheet in enumerate(wb):
+        if idx > 0:
+            content_parts.append("")  # Blank line between sheets for readability
+
+        # Escape sheet title to handle edge cases with special characters
+        safe_title = escape_sheet_title(sheet.title)
+        content_parts.append(f"{sheet_separator} Sheet: {safe_title} {sheet_separator}")
+
+        # Use sheet.max_column to get the maximum column width directly
+        max_columns = sheet.max_column if sheet.max_column else 0
+
+        # Extract rows with consistent width to preserve column alignment
+        for row in sheet.iter_rows(values_only=True):
+            row_parts = []
+
+            # Build row up to max_columns width
+            for idx in range(max_columns):
+                if idx < len(row):
+                    row_parts.append(escape_cell(row[idx]))
+                else:
+                    row_parts.append("")  # Pad short rows
+
+            # Check if row is completely empty
+            if all(part == "" for part in row_parts):
+                # Preserve empty rows as blank lines (maintains row structure)
+                content_parts.append("")
+            else:
+                # Join all columns to maintain consistent column count
+                content_parts.append("\t".join(row_parts))
+
+    # Final separator for symmetry (makes parsing easier)
+    content_parts.append(sheet_separator)
+    return "\n".join(content_parts)
 
 
 async def pipeline_enqueue_file(
@@ -1040,24 +1422,28 @@ async def pipeline_enqueue_file(
 
                 case ".pdf":
                     try:
-                        if global_args.document_loading_engine == "DOCLING":
-                            if not pm.is_installed("docling"):  # type: ignore
-                                pm.install("docling")
-                            from docling.document_converter import DocumentConverter  # type: ignore
-
-                            converter = DocumentConverter()
-                            result = converter.convert(file_path)
-                            content = result.document.export_to_markdown()
+                        # Try DOCLING first if configured and available
+                        if (
+                            global_args.document_loading_engine == "DOCLING"
+                            and _is_docling_available()
+                        ):
+                            content = await asyncio.to_thread(
+                                _convert_with_docling, file_path
+                            )
                         else:
-                            if not pm.is_installed("pypdf2"):  # type: ignore
-                                pm.install("pypdf2")
-                            from PyPDF2 import PdfReader  # type: ignore
-                            from io import BytesIO
-
-                            pdf_file = BytesIO(file)
-                            reader = PdfReader(pdf_file)
-                            for page in reader.pages:
-                                content += page.extract_text() + "\n"
+                            if (
+                                global_args.document_loading_engine == "DOCLING"
+                                and not _is_docling_available()
+                            ):
+                                logger.warning(
+                                    f"DOCLING engine configured but not available for {file_path.name}. Falling back to pypdf."
+                                )
+                            # Use pypdf (non-blocking via to_thread)
+                            content = await asyncio.to_thread(
+                                _extract_pdf_pypdf,
+                                file,
+                                global_args.pdf_decrypt_password,
+                            )
                     except Exception as e:
                         error_files = [
                             {
@@ -1077,28 +1463,24 @@ async def pipeline_enqueue_file(
 
                 case ".docx":
                     try:
-                        if global_args.document_loading_engine == "DOCLING":
-                            if not pm.is_installed("docling"):  # type: ignore
-                                pm.install("docling")
-                            from docling.document_converter import DocumentConverter  # type: ignore
-
-                            converter = DocumentConverter()
-                            result = converter.convert(file_path)
-                            content = result.document.export_to_markdown()
-                        else:
-                            if not pm.is_installed("python-docx"):  # type: ignore
-                                try:
-                                    pm.install("python-docx")
-                                except Exception:
-                                    pm.install("docx")
-                            from docx import Document  # type: ignore
-                            from io import BytesIO
-
-                            docx_file = BytesIO(file)
-                            doc = Document(docx_file)
-                            content = "\n".join(
-                                [paragraph.text for paragraph in doc.paragraphs]
+                        # Try DOCLING first if configured and available
+                        if (
+                            global_args.document_loading_engine == "DOCLING"
+                            and _is_docling_available()
+                        ):
+                            content = await asyncio.to_thread(
+                                _convert_with_docling, file_path
                             )
+                        else:
+                            if (
+                                global_args.document_loading_engine == "DOCLING"
+                                and not _is_docling_available()
+                            ):
+                                logger.warning(
+                                    f"DOCLING engine configured but not available for {file_path.name}. Falling back to python-docx."
+                                )
+                            # Use python-docx (non-blocking via to_thread)
+                            content = await asyncio.to_thread(_extract_docx, file)
                     except Exception as e:
                         error_files = [
                             {
@@ -1118,26 +1500,24 @@ async def pipeline_enqueue_file(
 
                 case ".pptx":
                     try:
-                        if global_args.document_loading_engine == "DOCLING":
-                            if not pm.is_installed("docling"):  # type: ignore
-                                pm.install("docling")
-                            from docling.document_converter import DocumentConverter  # type: ignore
-
-                            converter = DocumentConverter()
-                            result = converter.convert(file_path)
-                            content = result.document.export_to_markdown()
+                        # Try DOCLING first if configured and available
+                        if (
+                            global_args.document_loading_engine == "DOCLING"
+                            and _is_docling_available()
+                        ):
+                            content = await asyncio.to_thread(
+                                _convert_with_docling, file_path
+                            )
                         else:
-                            if not pm.is_installed("python-pptx"):  # type: ignore
-                                pm.install("pptx")
-                            from pptx import Presentation  # type: ignore
-                            from io import BytesIO
-
-                            pptx_file = BytesIO(file)
-                            prs = Presentation(pptx_file)
-                            for slide in prs.slides:
-                                for shape in slide.shapes:
-                                    if hasattr(shape, "text"):
-                                        content += shape.text + "\n"
+                            if (
+                                global_args.document_loading_engine == "DOCLING"
+                                and not _is_docling_available()
+                            ):
+                                logger.warning(
+                                    f"DOCLING engine configured but not available for {file_path.name}. Falling back to python-pptx."
+                                )
+                            # Use python-pptx (non-blocking via to_thread)
+                            content = await asyncio.to_thread(_extract_pptx, file)
                     except Exception as e:
                         error_files = [
                             {
@@ -1157,33 +1537,24 @@ async def pipeline_enqueue_file(
 
                 case ".xlsx":
                     try:
-                        if global_args.document_loading_engine == "DOCLING":
-                            if not pm.is_installed("docling"):  # type: ignore
-                                pm.install("docling")
-                            from docling.document_converter import DocumentConverter  # type: ignore
-
-                            converter = DocumentConverter()
-                            result = converter.convert(file_path)
-                            content = result.document.export_to_markdown()
+                        # Try DOCLING first if configured and available
+                        if (
+                            global_args.document_loading_engine == "DOCLING"
+                            and _is_docling_available()
+                        ):
+                            content = await asyncio.to_thread(
+                                _convert_with_docling, file_path
+                            )
                         else:
-                            if not pm.is_installed("openpyxl"):  # type: ignore
-                                pm.install("openpyxl")
-                            from openpyxl import load_workbook  # type: ignore
-                            from io import BytesIO
-
-                            xlsx_file = BytesIO(file)
-                            wb = load_workbook(xlsx_file)
-                            for sheet in wb:
-                                content += f"Sheet: {sheet.title}\n"
-                                for row in sheet.iter_rows(values_only=True):
-                                    content += (
-                                        "\t".join(
-                                            str(cell) if cell is not None else ""
-                                            for cell in row
-                                        )
-                                        + "\n"
-                                    )
-                                content += "\n"
+                            if (
+                                global_args.document_loading_engine == "DOCLING"
+                                and not _is_docling_available()
+                            ):
+                                logger.warning(
+                                    f"DOCLING engine configured but not available for {file_path.name}. Falling back to openpyxl."
+                                )
+                            # Use openpyxl (non-blocking via to_thread)
+                            content = await asyncio.to_thread(_extract_xlsx, file)
                     except Exception as e:
                         error_files = [
                             {
@@ -1394,7 +1765,6 @@ async def pipeline_index_texts(
     texts: List[str],
     file_sources: List[str] = None,
     track_id: str = None,
-    external_ids: List[str] = None,
 ):
     """Index a list of texts with track_id
 
@@ -1413,7 +1783,7 @@ async def pipeline_index_texts(
                 for _ in range(len(file_sources), len(texts))
             ]
     await rag.apipeline_enqueue_documents(
-        input=texts, file_paths=file_sources, track_id=track_id, external_ids=external_ids
+        input=texts, file_paths=file_sources, track_id=track_id
     )
     await rag.apipeline_process_enqueue_documents()
 
@@ -1421,10 +1791,10 @@ async def pipeline_index_texts(
 async def run_scanning_process(
     rag: LightRAG, doc_manager: DocumentManager, track_id: str = None
 ):
-    """Background task to scan and index documents (tenant-scoped)
+    """Background task to scan and index documents
 
     Args:
-        rag: Tenant-specific LightRAG instance
+        rag: LightRAG instance
         doc_manager: DocumentManager instance
         track_id: Optional tracking ID to pass to all scanned files
     """
@@ -1482,17 +1852,20 @@ async def background_delete_documents(
     doc_manager: DocumentManager,
     doc_ids: List[str],
     delete_file: bool = False,
+    delete_llm_cache: bool = False,
 ):
     """Background task to delete multiple documents"""
     from lightrag.kg.shared_storage import (
         get_namespace_data,
-        get_pipeline_status_lock,
-        initialize_pipeline_status,
+        get_namespace_lock,
     )
 
-    await initialize_pipeline_status(rag.pipeline_status_key)
-    pipeline_status = await get_namespace_data(rag.pipeline_status_key)
-    pipeline_status_lock = get_pipeline_status_lock()
+    pipeline_status = await get_namespace_data(
+        "pipeline_status", workspace=rag.workspace
+    )
+    pipeline_status_lock = get_namespace_lock(
+        "pipeline_status", workspace=rag.workspace
+    )
 
     total_docs = len(doc_ids)
     successful_deletions = []
@@ -1508,6 +1881,7 @@ async def background_delete_documents(
         pipeline_status.update(
             {
                 "busy": True,
+                # Job name can not be changed, it's verified in adelete_by_doc_id()
                 "job_name": f"Deleting {total_docs} Documents",
                 "job_start": datetime.now().isoformat(),
                 "docs": total_docs,
@@ -1518,11 +1892,27 @@ async def background_delete_documents(
         )
         # Use slice assignment to clear the list in place
         pipeline_status["history_messages"][:] = ["Starting document deletion process"]
+        if delete_llm_cache:
+            pipeline_status["history_messages"].append(
+                "LLM cache cleanup requested for this deletion job"
+            )
 
     try:
         # Loop through each document ID and delete them one by one
         for i, doc_id in enumerate(doc_ids, 1):
+            # Check for cancellation at the start of each document deletion
             async with pipeline_status_lock:
+                if pipeline_status.get("cancellation_requested", False):
+                    cancel_msg = f"Deletion cancelled by user at document {i}/{total_docs}. {len(successful_deletions)} deleted, {total_docs - i + 1} remaining."
+                    logger.info(cancel_msg)
+                    pipeline_status["latest_message"] = cancel_msg
+                    pipeline_status["history_messages"].append(cancel_msg)
+                    # Add remaining documents to failed list with cancellation reason
+                    failed_deletions.extend(
+                        doc_ids[i - 1 :]
+                    )  # i-1 because enumerate starts at 1
+                    break  # Exit the loop, remaining documents unchanged
+
                 start_msg = f"Deleting document {i}/{total_docs}: {doc_id}"
                 logger.info(start_msg)
                 pipeline_status["cur_batch"] = i
@@ -1531,7 +1921,9 @@ async def background_delete_documents(
 
             file_path = "#"
             try:
-                result = await rag.adelete_by_doc_id(doc_id)
+                result = await rag.adelete_by_doc_id(
+                    doc_id, delete_llm_cache=delete_llm_cache
+                )
                 file_path = (
                     getattr(result, "file_path", "-") if "result" in locals() else "-"
                 )
@@ -1683,6 +2075,10 @@ async def background_delete_documents(
         # Final summary and check for pending requests
         async with pipeline_status_lock:
             pipeline_status["busy"] = False
+            pipeline_status["pending_requests"] = False  # Reset pending requests flag
+            pipeline_status["cancellation_requested"] = (
+                False  # Always reset cancellation flag
+            )
             completion_msg = f"Deletion completed: {len(successful_deletions)} successful, {len(failed_deletions)} failed"
             pipeline_status["latest_message"] = completion_msg
             pipeline_status["history_messages"].append(completion_msg)
@@ -1702,54 +2098,51 @@ async def background_delete_documents(
 
 
 def create_document_routes(
-    rag: LightRAG, doc_manager: DocumentManager, api_key: Optional[str] = None, rag_manager: Optional[TenantRAGManager] = None
+    rag: LightRAG,
+    doc_manager: DocumentManager,
+    api_key: Optional[str] = None,
+    rag_manager: Optional["TenantRAGManager"] = None,
 ):
-    # Create a fresh APIRouter for each call so callers can mount isolated routers
-    # (important for tests which instantiate multiple apps in the same process)
-    router = APIRouter(prefix="/documents", tags=["documents"])
+    """Create document routes with optional multi-tenant support.
+
+    Args:
+        rag: Default/global LightRAG instance
+        doc_manager: Document manager for file operations
+        api_key: Optional API key for authentication
+        rag_manager: Optional TenantRAGManager for multi-tenant mode
+    """
+    # Import here to avoid circular dependencies
+    from lightrag.api.dependencies import get_tenant_context_optional
+    from lightrag.models.tenant import TenantContext
+
     # Create combined auth dependency for document routes
     combined_auth = get_combined_auth_dependency(api_key)
-    
-    # SEC-001 FIX: Check strict mode configuration
-    try:
-        from lightrag.api.config import MULTI_TENANT_STRICT_MODE
-        strict_mode = MULTI_TENANT_STRICT_MODE
-    except ImportError:
-        strict_mode = False
-    
-    async def get_tenant_rag(tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional)) -> LightRAG:
-        """Dependency to get tenant-specific RAG instance.
-        
-        In strict multi-tenant mode, raises error if tenant context is missing.
-        In non-strict mode, falls back to global RAG for backward compatibility.
-        """
-        if rag_manager and tenant_context and tenant_context.tenant_id and tenant_context.kb_id:
-            return await rag_manager.get_rag_instance(
-                tenant_context.tenant_id, 
-                tenant_context.kb_id,
-                tenant_context.user_id  # Pass user_id for security validation
-            )
-        
-        # SEC-001 FIX: In strict mode, don't allow fallback to global RAG
-        if strict_mode and rag_manager:
-            from fastapi import HTTPException
-            raise HTTPException(
-                status_code=400,
-                detail="Tenant context required. Provide X-Tenant-ID and X-KB-ID headers."
-            )
-        
-        return rag
 
-    async def get_tenant_doc_manager(tenant_rag: LightRAG = Depends(get_tenant_rag)) -> DocumentManager:
-        """Dependency to get tenant-specific DocumentManager"""
-        # If we are using the global rag instance (no tenant context or single tenant), use the global doc_manager
-        if tenant_rag is rag:
-            return doc_manager
-            
-        # Otherwise, create a tenant-specific document manager
-        # We use the tenant's working directory + "inputs" to ensure isolation
-        input_dir = Path(tenant_rag.working_dir) / "inputs"
-        return DocumentManager(str(input_dir))
+    async def get_tenant_rag(
+        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional),
+    ) -> LightRAG:
+        """Dependency to get tenant-specific RAG instance for document operations.
+
+        In multi-tenant mode (when rag_manager is provided), returns tenant-specific RAG.
+        Otherwise, falls back to the global RAG instance.
+        """
+        if (
+            rag_manager
+            and tenant_context
+            and tenant_context.tenant_id
+            and tenant_context.kb_id
+        ):
+            try:
+                return await rag_manager.get_rag_instance(
+                    tenant_context.tenant_id,
+                    tenant_context.kb_id,
+                    tenant_context.user_id,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to get tenant RAG instance: {e}, falling back to global"
+                )
+        return rag
 
     @router.post(
         "/scan", response_model=ScanResponse, dependencies=[Depends(combined_auth)]
@@ -1757,17 +2150,17 @@ def create_document_routes(
     async def scan_for_new_documents(
         background_tasks: BackgroundTasks,
         tenant_rag: LightRAG = Depends(get_tenant_rag),
-        tenant_doc_manager: DocumentManager = Depends(get_tenant_doc_manager),
     ):
         """
-        Trigger the scanning process for new documents (tenant-scoped).
+        Trigger the scanning process for new documents.
 
         This endpoint initiates a background task that scans the input directory for new documents
-        and processes them within the selected tenant and knowledge base context.
+        and processes them. If a scanning process is already running, it returns a status indicating
+        that fact.
 
         Args:
-            tenant_rag: Tenant-specific RAG instance (injected via dependency)
-            tenant_doc_manager: Tenant-specific DocumentManager (injected via dependency)
+            background_tasks: FastAPI BackgroundTasks for async processing
+            tenant_rag: Tenant-specific RAG instance (injected dependency)
 
         Returns:
             ScanResponse: A response object containing the scanning status and track_id
@@ -1775,8 +2168,10 @@ def create_document_routes(
         # Generate track_id with "scan" prefix for scanning operation
         track_id = generate_track_id("scan")
 
-        # Start the scanning process in the background with tenant-specific RAG and DocManager
-        background_tasks.add_task(run_scanning_process, tenant_rag, tenant_doc_manager, track_id)
+        # Start the scanning process in the background with track_id (use tenant-specific RAG)
+        background_tasks.add_task(
+            run_scanning_process, tenant_rag, doc_manager, track_id
+        )
         return ScanResponse(
             status="scanning_started",
             message="Scanning process has been initiated in the background",
@@ -1790,20 +2185,18 @@ def create_document_routes(
         background_tasks: BackgroundTasks,
         file: UploadFile = File(...),
         tenant_rag: LightRAG = Depends(get_tenant_rag),
-        tenant_doc_manager: DocumentManager = Depends(get_tenant_doc_manager),
     ):
         """
-        Upload a file to the input directory and index it (tenant-scoped).
+        Upload a file to the input directory and index it.
 
         This API endpoint accepts a file through an HTTP POST request, checks if the
-        uploaded file is of a supported type, saves it in the tenant-specific input directory,
+        uploaded file is of a supported type, saves it in the specified input directory,
         indexes it for retrieval, and returns a success status with relevant details.
 
         Args:
             background_tasks: FastAPI BackgroundTasks for async processing
             file (UploadFile): The file to be uploaded. It must have an allowed extension.
-            tenant_rag: Tenant-specific RAG instance (injected via dependency)
-            tenant_doc_manager: Tenant-specific DocumentManager (injected via dependency)
+            tenant_rag: Tenant-specific RAG instance (injected dependency)
 
         Returns:
             InsertResponse: A response object containing the upload status and a message.
@@ -1814,26 +2207,30 @@ def create_document_routes(
         """
         try:
             # Sanitize filename to prevent Path Traversal attacks
-            safe_filename = sanitize_filename(file.filename, tenant_doc_manager.input_dir)
+            safe_filename = sanitize_filename(file.filename, doc_manager.input_dir)
 
-            if not tenant_doc_manager.is_supported_file(safe_filename):
+            if not doc_manager.is_supported_file(safe_filename):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Unsupported file type. Supported types: {tenant_doc_manager.supported_extensions}",
+                    detail=f"Unsupported file type. Supported types: {doc_manager.supported_extensions}",
                 )
 
-            # Check if filename already exists in tenant-specific doc_status storage
-            existing_doc_data = await tenant_rag.doc_status.get_doc_by_file_path(safe_filename)
+            # Check if filename already exists in doc_status storage (tenant-specific)
+            existing_doc_data = await tenant_rag.doc_status.get_doc_by_file_path(
+                safe_filename
+            )
             if existing_doc_data:
-                # Get document status information for error message
+                # Get document status and track_id from existing document
                 status = existing_doc_data.get("status", "unknown")
+                # Use `or ""` to handle both missing key and None value (e.g., legacy rows without track_id)
+                existing_track_id = existing_doc_data.get("track_id") or ""
                 return InsertResponse(
                     status="duplicated",
                     message=f"File '{safe_filename}' already exists in document storage (Status: {status}).",
-                    track_id="",
+                    track_id=existing_track_id,
                 )
 
-            file_path = tenant_doc_manager.input_dir / safe_filename
+            file_path = doc_manager.input_dir / safe_filename
             # Check if file already exists in file system
             if file_path.exists():
                 return InsertResponse(
@@ -1847,8 +2244,10 @@ def create_document_routes(
 
             track_id = generate_track_id("upload")
 
-            # Add to background tasks with tenant-specific RAG
-            background_tasks.add_task(pipeline_index_file, tenant_rag, file_path, track_id)
+            # Add to background tasks and get track_id (use tenant-specific RAG)
+            background_tasks.add_task(
+                pipeline_index_file, tenant_rag, file_path, track_id
+            )
 
             return InsertResponse(
                 status="success",
@@ -1865,22 +2264,20 @@ def create_document_routes(
         "/text", response_model=InsertResponse, dependencies=[Depends(combined_auth)]
     )
     async def insert_text(
-        request: InsertTextRequest, background_tasks: BackgroundTasks, tenant_rag: LightRAG = Depends(get_tenant_rag)
+        request: InsertTextRequest,
+        background_tasks: BackgroundTasks,
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
     ):
         """
-        Insert text into the RAG system (tenant-scoped).
+        Insert text into the RAG system.
 
         This endpoint allows you to insert text data into the RAG system for later retrieval
-        and use in generating responses within the selected tenant and knowledge base.
-        
-        Idempotency: If `external_id` is provided and a document with this ID already exists,
-        the existing document will be returned instead of creating a duplicate. This ensures
-        safe retry behavior for document ingestion.
+        and use in generating responses.
 
         Args:
             request (InsertTextRequest): The request body containing the text to be inserted.
             background_tasks: FastAPI BackgroundTasks for async processing
-            tenant_rag: Tenant-specific RAG instance (injected via dependency)
+            tenant_rag: Tenant-specific RAG instance (injected dependency)
 
         Returns:
             InsertResponse: A response object containing the status of the operation.
@@ -1889,22 +2286,7 @@ def create_document_routes(
             HTTPException: If an error occurs during text processing (500).
         """
         try:
-            # Check for idempotency using external_id if provided
-            if request.external_id and request.external_id.strip():
-                existing_doc = await tenant_rag.doc_status.get_doc_by_external_id(
-                    request.external_id
-                )
-                if existing_doc:
-                    status = existing_doc.get("status", "unknown")
-                    doc_id = existing_doc.get("id", "")
-                    logger.info(f"Idempotent request: external_id '{request.external_id}' already exists with doc_id '{doc_id}'")
-                    return InsertResponse(
-                        status="duplicated",
-                        message=f"Document with external_id '{request.external_id}' already exists (Status: {status}, Doc ID: {doc_id}).",
-                        track_id=existing_doc.get("track_id", ""),
-                    )
-            
-            # Check if file_source already exists in doc_status storage
+            # Check if file_source already exists in doc_status storage (tenant-specific)
             if (
                 request.file_source
                 and request.file_source.strip()
@@ -1914,13 +2296,29 @@ def create_document_routes(
                     request.file_source
                 )
                 if existing_doc_data:
-                    # Get document status information for error message
+                    # Get document status and track_id from existing document
                     status = existing_doc_data.get("status", "unknown")
+                    # Use `or ""` to handle both missing key and None value (e.g., legacy rows without track_id)
+                    existing_track_id = existing_doc_data.get("track_id") or ""
                     return InsertResponse(
                         status="duplicated",
                         message=f"File source '{request.file_source}' already exists in document storage (Status: {status}).",
-                        track_id="",
+                        track_id=existing_track_id,
                     )
+
+            # Check if content already exists by computing content hash (doc_id) (tenant-specific)
+            sanitized_text = sanitize_text_for_encoding(request.text)
+            content_doc_id = compute_mdhash_id(sanitized_text, prefix="doc-")
+            existing_doc = await tenant_rag.doc_status.get_by_id(content_doc_id)
+            if existing_doc:
+                # Content already exists, return duplicated with existing track_id
+                status = existing_doc.get("status", "unknown")
+                existing_track_id = existing_doc.get("track_id") or ""
+                return InsertResponse(
+                    status="duplicated",
+                    message=f"Identical content already exists in document storage (doc_id: {content_doc_id}, Status: {status}).",
+                    track_id=existing_track_id,
+                )
 
             # Generate track_id for text insertion
             track_id = generate_track_id("insert")
@@ -1931,7 +2329,6 @@ def create_document_routes(
                 [request.text],
                 file_sources=[request.file_source],
                 track_id=track_id,
-                external_ids=[request.external_id] if request.external_id else None,
             )
 
             return InsertResponse(
@@ -1950,18 +2347,20 @@ def create_document_routes(
         dependencies=[Depends(combined_auth)],
     )
     async def insert_texts(
-        request: InsertTextsRequest, background_tasks: BackgroundTasks, tenant_rag: LightRAG = Depends(get_tenant_rag)
+        request: InsertTextsRequest,
+        background_tasks: BackgroundTasks,
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
     ):
         """
-        Insert multiple texts into the RAG system (tenant-scoped).
+        Insert multiple texts into the RAG system.
 
         This endpoint allows you to insert multiple text entries into the RAG system
-        in a single request within the selected tenant and knowledge base.
+        in a single request.
 
         Args:
             request (InsertTextsRequest): The request body containing the list of texts.
             background_tasks: FastAPI BackgroundTasks for async processing
-            tenant_rag: Tenant-specific RAG instance (injected via dependency)
+            tenant_rag: Tenant-specific RAG instance (injected dependency)
 
         Returns:
             InsertResponse: A response object containing the status of the operation.
@@ -1970,7 +2369,7 @@ def create_document_routes(
             HTTPException: If an error occurs during text processing (500).
         """
         try:
-            # Check if any file_sources already exist in doc_status storage
+            # Check if any file_sources already exist in doc_status storage (tenant-specific)
             if request.file_sources:
                 for file_source in request.file_sources:
                     if (
@@ -1978,17 +2377,36 @@ def create_document_routes(
                         and file_source.strip()
                         and file_source != "unknown_source"
                     ):
-                        existing_doc_data = await tenant_rag.doc_status.get_doc_by_file_path(
-                            file_source
+                        existing_doc_data = (
+                            await tenant_rag.doc_status.get_doc_by_file_path(
+                                file_source
+                            )
                         )
                         if existing_doc_data:
-                            # Get document status information for error message
+                            # Get document status and track_id from existing document
                             status = existing_doc_data.get("status", "unknown")
+                            # Use `or ""` to handle both missing key and None value (e.g., legacy rows without track_id)
+                            existing_track_id = existing_doc_data.get("track_id") or ""
                             return InsertResponse(
                                 status="duplicated",
                                 message=f"File source '{file_source}' already exists in document storage (Status: {status}).",
-                                track_id="",
+                                track_id=existing_track_id,
                             )
+
+            # Check if any content already exists by computing content hash (doc_id) (tenant-specific)
+            for text in request.texts:
+                sanitized_text = sanitize_text_for_encoding(text)
+                content_doc_id = compute_mdhash_id(sanitized_text, prefix="doc-")
+                existing_doc = await tenant_rag.doc_status.get_by_id(content_doc_id)
+                if existing_doc:
+                    # Content already exists, return duplicated with existing track_id
+                    status = existing_doc.get("status", "unknown")
+                    existing_track_id = existing_doc.get("track_id") or ""
+                    return InsertResponse(
+                        status="duplicated",
+                        message=f"Identical content already exists in document storage (doc_id: {content_doc_id}, Status: {status}).",
+                        track_id=existing_track_id,
+                    )
 
             # Generate track_id for texts insertion
             track_id = generate_track_id("insert")
@@ -1999,7 +2417,6 @@ def create_document_routes(
                 request.texts,
                 file_sources=request.file_sources,
                 track_id=track_id,
-                external_ids=request.external_ids,
             )
 
             return InsertResponse(
@@ -2015,16 +2432,16 @@ def create_document_routes(
     @router.delete(
         "", response_model=ClearDocumentsResponse, dependencies=[Depends(combined_auth)]
     )
-    async def clear_documents(
-        tenant_rag: LightRAG = Depends(get_tenant_rag),
-        tenant_doc_manager: DocumentManager = Depends(get_tenant_doc_manager),
-    ):
+    async def clear_documents(tenant_rag: LightRAG = Depends(get_tenant_rag)):
         """
         Clear all documents from the RAG system.
 
         This endpoint deletes all documents, entities, relationships, and files from the system.
         It uses the storage drop methods to properly clean up all data and removes all files
         from the input directory.
+
+        Args:
+            tenant_rag: Tenant-specific RAG instance (injected dependency)
 
         Returns:
             ClearDocumentsResponse: A response object containing the status and message.
@@ -2041,14 +2458,16 @@ def create_document_routes(
         """
         from lightrag.kg.shared_storage import (
             get_namespace_data,
-            get_pipeline_status_lock,
-            initialize_pipeline_status,
+            get_namespace_lock,
         )
 
-        # Get pipeline status and lock
-        await initialize_pipeline_status(tenant_rag.pipeline_status_key)
-        pipeline_status = await get_namespace_data(tenant_rag.pipeline_status_key)
-        pipeline_status_lock = get_pipeline_status_lock()
+        # Get pipeline status and lock (tenant-specific)
+        pipeline_status = await get_namespace_data(
+            "pipeline_status", workspace=tenant_rag.workspace
+        )
+        pipeline_status_lock = get_namespace_lock(
+            "pipeline_status", workspace=tenant_rag.workspace
+        )
 
         # Check and set status with lock
         async with pipeline_status_lock:
@@ -2077,13 +2496,15 @@ def create_document_routes(
             )
 
         try:
-            # Use drop method to clear all data
+            # Use drop method to clear all data (tenant-specific)
             drop_tasks = []
             storages = [
                 tenant_rag.text_chunks,
                 tenant_rag.full_docs,
                 tenant_rag.full_entities,
                 tenant_rag.full_relations,
+                tenant_rag.entity_chunks,
+                tenant_rag.relation_chunks,
                 tenant_rag.entities_vdb,
                 tenant_rag.relationships_vdb,
                 tenant_rag.chunks_vdb,
@@ -2153,7 +2574,7 @@ def create_document_routes(
             deleted_files_count = 0
             file_errors_count = 0
 
-            for file_path in tenant_doc_manager.input_dir.glob("*"):
+            for file_path in doc_manager.input_dir.glob("*"):
                 if file_path.is_file():
                     try:
                         file_path.unlink()
@@ -2210,12 +2631,16 @@ def create_document_routes(
         dependencies=[Depends(combined_auth)],
         response_model=PipelineStatusResponse,
     )
-    async def get_pipeline_status(tenant_rag: LightRAG = Depends(get_tenant_rag)) -> PipelineStatusResponse:
+    async def get_pipeline_status(
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
+    ) -> PipelineStatusResponse:
         """
         Get the current status of the document indexing pipeline.
 
         This endpoint returns information about the current state of the document processing pipeline,
         including the processing status, progress information, and history messages.
+
+        In multi-tenant mode, returns pipeline status for the current tenant/KB context.
 
         Returns:
             PipelineStatusResponse: A response object containing:
@@ -2237,15 +2662,22 @@ def create_document_routes(
         try:
             from lightrag.kg.shared_storage import (
                 get_namespace_data,
+                get_namespace_lock,
                 get_all_update_flags_status,
-                initialize_pipeline_status,
             )
 
-            await initialize_pipeline_status(tenant_rag.pipeline_status_key)
-            pipeline_status = await get_namespace_data(tenant_rag.pipeline_status_key)
+            # Use tenant-specific workspace for pipeline status
+            workspace = tenant_rag.workspace
+
+            pipeline_status = await get_namespace_data(
+                "pipeline_status", workspace=workspace
+            )
+            pipeline_status_lock = get_namespace_lock(
+                "pipeline_status", workspace=workspace
+            )
 
             # Get update flags status for all namespaces
-            update_status = await get_all_update_flags_status()
+            update_status = await get_all_update_flags_status(workspace=workspace)
 
             # Convert MutableBoolean objects to regular boolean values
             processed_update_status = {}
@@ -2259,8 +2691,9 @@ def create_document_routes(
                         processed_flags.append(bool(flag))
                 processed_update_status[namespace] = processed_flags
 
-            # Convert to regular dict if it's a Manager.dict
-            status_dict = dict(pipeline_status)
+            async with pipeline_status_lock:
+                # Convert to regular dict if it's a Manager.dict
+                status_dict = dict(pipeline_status)
 
             # Add processed update_status to the status dictionary
             status_dict["update_status"] = processed_update_status
@@ -2300,21 +2733,18 @@ def create_document_routes(
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=str(e))
 
-    # TODO: Deprecated
+    # TODO: Deprecated, use /documents/paginated instead
     @router.get(
         "", response_model=DocsStatusesResponse, dependencies=[Depends(combined_auth)]
     )
-    async def documents(tenant_rag: LightRAG = Depends(get_tenant_rag)) -> DocsStatusesResponse:
+    async def documents() -> DocsStatusesResponse:
         """
-        Get the status of all documents in the system (tenant-scoped). This endpoint is deprecated; use /documents/paginated instead.
+        Get the status of all documents in the system. This endpoint is deprecated; use /documents/paginated instead.
         To prevent excessive resource consumption, a maximum of 1,000 records is returned.
 
-        This endpoint retrieves the current status of all documents within the selected tenant
-        and knowledge base, grouped by their processing status (PENDING, PROCESSING, PROCESSED, FAILED). 
-        The results are limited to 1000 total documents with fair distribution across all statuses.
-
-        Args:
-            tenant_rag: Tenant-specific RAG instance (injected via dependency)
+        This endpoint retrieves the current status of all documents, grouped by their
+        processing status (PENDING, PROCESSING, PREPROCESSED, PROCESSED, FAILED). The results are
+        limited to 1000 total documents with fair distribution across all statuses.
 
         Returns:
             DocsStatusesResponse: A response object containing a dictionary where keys are
@@ -2329,11 +2759,12 @@ def create_document_routes(
             statuses = (
                 DocStatus.PENDING,
                 DocStatus.PROCESSING,
+                DocStatus.PREPROCESSED,
                 DocStatus.PROCESSED,
                 DocStatus.FAILED,
             )
 
-            tasks = [tenant_rag.get_docs_by_status(status) for status in statuses]
+            tasks = [rag.get_docs_by_status(status) for status in statuses]
             results: List[Dict[str, DocProcessingStatus]] = await asyncio.gather(*tasks)
 
             response = DocsStatusesResponse()
@@ -2423,29 +2854,26 @@ def create_document_routes(
         delete_request: DeleteDocRequest,
         background_tasks: BackgroundTasks,
         tenant_rag: LightRAG = Depends(get_tenant_rag),
-        tenant_doc_manager: DocumentManager = Depends(get_tenant_doc_manager),
     ) -> DeleteDocByIdResponse:
         """
         Delete documents and all their associated data by their IDs using background processing.
 
         Deletes specific documents and all their associated data, including their status,
-        text chunks, vector embeddings, and any related graph data.
+        text chunks, vector embeddings, and any related graph data. When requested,
+        cached LLM extraction responses are removed after graph deletion/rebuild completes.
         The deletion process runs in the background to avoid blocking the client connection.
-        It is disabled when llm cache for entity extraction is disabled.
 
         This operation is irreversible and will interact with the pipeline status.
 
         Args:
-            delete_request (DeleteDocRequest): The request containing the document IDs and delete_file options.
+            delete_request (DeleteDocRequest): The request containing the document IDs and deletion options.
             background_tasks: FastAPI BackgroundTasks for async processing
-            tenant_rag: Tenant-specific RAG instance (injected via dependency)
-            tenant_doc_manager: Tenant-specific DocumentManager (injected via dependency)
+            tenant_rag: Tenant-specific RAG instance (injected dependency)
 
         Returns:
             DeleteDocByIdResponse: The result of the deletion operation.
                 - status="deletion_started": The document deletion has been initiated in the background.
                 - status="busy": The pipeline is busy with another operation.
-                - status="not_allowed": Operation not allowed when LLM cache for entity extraction is disabled.
 
         Raises:
             HTTPException:
@@ -2453,35 +2881,36 @@ def create_document_routes(
         """
         doc_ids = delete_request.doc_ids
 
-        # The rag object is initialized from the server startup args,
-        # so we can access its properties here.
-        if not tenant_rag.enable_llm_cache_for_entity_extract:
-            return DeleteDocByIdResponse(
-                status="not_allowed",
-                message="Operation not allowed when LLM cache for entity extraction is disabled.",
-                doc_id=", ".join(delete_request.doc_ids),
+        try:
+            from lightrag.kg.shared_storage import (
+                get_namespace_data,
+                get_namespace_lock,
             )
 
-        try:
-            from lightrag.kg.shared_storage import get_namespace_data
+            pipeline_status = await get_namespace_data(
+                "pipeline_status", workspace=tenant_rag.workspace
+            )
+            pipeline_status_lock = get_namespace_lock(
+                "pipeline_status", workspace=tenant_rag.workspace
+            )
 
-            pipeline_status = await get_namespace_data(tenant_rag.pipeline_status_key)
+            # Check if pipeline is busy with proper lock
+            async with pipeline_status_lock:
+                if pipeline_status.get("busy", False):
+                    return DeleteDocByIdResponse(
+                        status="busy",
+                        message="Cannot delete documents while pipeline is busy",
+                        doc_id=", ".join(doc_ids),
+                    )
 
-            # Check if pipeline is busy
-            if pipeline_status.get("busy", False):
-                return DeleteDocByIdResponse(
-                    status="busy",
-                    message="Cannot delete documents while pipeline is busy",
-                    doc_id=", ".join(doc_ids),
-                )
-
-            # Add deletion task to background tasks
+            # Add deletion task to background tasks (use tenant-specific RAG)
             background_tasks.add_task(
                 background_delete_documents,
                 tenant_rag,
-                tenant_doc_manager,
+                doc_manager,
                 doc_ids,
                 delete_request.delete_file,
+                delete_request.delete_llm_cache,
             )
 
             return DeleteDocByIdResponse(
@@ -2501,16 +2930,18 @@ def create_document_routes(
         response_model=ClearCacheResponse,
         dependencies=[Depends(combined_auth)],
     )
-    async def clear_cache(request: ClearCacheRequest, tenant_rag: LightRAG = Depends(get_tenant_rag)):
+    async def clear_cache(
+        request: ClearCacheRequest, tenant_rag: LightRAG = Depends(get_tenant_rag)
+    ):
         """
-        Clear all cache data from the LLM response cache storage (tenant-scoped).
+        Clear all cache data from the LLM response cache storage.
 
-        This endpoint clears all cached LLM responses regardless of mode for the selected tenant.
+        This endpoint clears all cached LLM responses regardless of mode.
         The request body is accepted for API compatibility but is ignored.
 
         Args:
             request (ClearCacheRequest): The request body (ignored for compatibility).
-            tenant_rag: Tenant-specific RAG instance (injected via dependency)
+            tenant_rag: Tenant-specific RAG instance (injected dependency)
 
         Returns:
             ClearCacheResponse: A response object containing the status and message.
@@ -2519,7 +2950,7 @@ def create_document_routes(
             HTTPException: If an error occurs during cache clearing (500).
         """
         try:
-            # Call the aclear_cache method (no modes parameter)
+            # Call the aclear_cache method (no modes parameter) - tenant-specific
             await tenant_rag.aclear_cache()
 
             # Prepare success message
@@ -2536,13 +2967,15 @@ def create_document_routes(
         response_model=DeletionResult,
         dependencies=[Depends(combined_auth)],
     )
-    async def delete_entity(request: DeleteEntityRequest, tenant_rag: LightRAG = Depends(get_tenant_rag)):
+    async def delete_entity(
+        request: DeleteEntityRequest, tenant_rag: LightRAG = Depends(get_tenant_rag)
+    ):
         """
-        Delete an entity and all its relationships from the knowledge graph (tenant-scoped).
+        Delete an entity and all its relationships from the knowledge graph.
 
         Args:
             request (DeleteEntityRequest): The request body containing the entity name.
-            tenant_rag: Tenant-specific RAG instance (injected via dependency)
+            tenant_rag: Tenant-specific RAG instance (injected dependency)
 
         Returns:
             DeletionResult: An object containing the outcome of the deletion process.
@@ -2572,13 +3005,15 @@ def create_document_routes(
         response_model=DeletionResult,
         dependencies=[Depends(combined_auth)],
     )
-    async def delete_relation(request: DeleteRelationRequest, tenant_rag: LightRAG = Depends(get_tenant_rag)):
+    async def delete_relation(
+        request: DeleteRelationRequest, tenant_rag: LightRAG = Depends(get_tenant_rag)
+    ):
         """
-        Delete a relationship between two entities from the knowledge graph (tenant-scoped).
+        Delete a relationship between two entities from the knowledge graph.
 
         Args:
             request (DeleteRelationRequest): The request body containing the source and target entity names.
-            tenant_rag: Tenant-specific RAG instance (injected via dependency)
+            tenant_rag: Tenant-specific RAG instance (injected dependency)
 
         Returns:
             DeletionResult: An object containing the outcome of the deletion process.
@@ -2611,17 +3046,15 @@ def create_document_routes(
         response_model=TrackStatusResponse,
         dependencies=[Depends(combined_auth)],
     )
-    async def get_track_status(track_id: str, tenant_rag: LightRAG = Depends(get_tenant_rag)) -> TrackStatusResponse:
+    async def get_track_status(track_id: str) -> TrackStatusResponse:
         """
-        Get the processing status of documents by tracking ID (tenant-scoped).
+        Get the processing status of documents by tracking ID.
 
         This endpoint retrieves all documents associated with a specific tracking ID,
-        allowing users to monitor the processing progress of their uploaded files or inserted texts
-        within the selected tenant and knowledge base.
+        allowing users to monitor the processing progress of their uploaded files or inserted texts.
 
         Args:
             track_id (str): The tracking ID returned from upload, text, or texts endpoints
-            tenant_rag: Tenant-specific RAG instance (injected via dependency)
 
         Returns:
             TrackStatusResponse: A response object containing:
@@ -2640,7 +3073,7 @@ def create_document_routes(
             track_id = track_id.strip()
 
             # Get documents by track_id
-            docs_by_track_id = await tenant_rag.aget_docs_by_track_id(track_id)
+            docs_by_track_id = await rag.aget_docs_by_track_id(track_id)
 
             # Convert to response format
             documents = []
@@ -2692,15 +3125,16 @@ def create_document_routes(
         tenant_rag: LightRAG = Depends(get_tenant_rag),
     ) -> PaginatedDocsResponse:
         """
-        Get documents with pagination support (tenant-scoped).
+        Get documents with pagination support.
 
         This endpoint retrieves documents with pagination, filtering, and sorting capabilities.
         It provides better performance for large document collections by loading only the
-        requested page of data. Documents are scoped to the selected tenant and knowledge base.
+        requested page of data.
+
+        In multi-tenant mode, returns documents only for the current tenant/KB context.
 
         Args:
             request (DocumentsRequest): The request body containing pagination parameters
-            tenant_rag: Tenant-specific RAG instance (injected via dependency)
 
         Returns:
             PaginatedDocsResponse: A response object containing:
@@ -2712,7 +3146,8 @@ def create_document_routes(
             HTTPException: If an error occurs while retrieving documents (500).
         """
         try:
-            # Get paginated documents and status counts in parallel using tenant-specific RAG
+            # Get paginated documents and status counts in parallel
+            # Use tenant-specific RAG for document operations
             docs_task = tenant_rag.doc_status.get_docs_paginated(
                 status_filter=request.status_filter,
                 page=request.page,
@@ -2780,13 +3215,12 @@ def create_document_routes(
         tenant_rag: LightRAG = Depends(get_tenant_rag),
     ) -> StatusCountsResponse:
         """
-        Get counts of documents by status (tenant-scoped).
+        Get counts of documents by status.
 
         This endpoint retrieves the count of documents in each processing status
-        (PENDING, PROCESSING, PROCESSED, FAILED) for the selected tenant and knowledge base.
+        (PENDING, PROCESSING, PROCESSED, FAILED) for all documents in the system.
 
-        Args:
-            tenant_rag: Tenant-specific RAG instance (injected via dependency)
+        In multi-tenant mode, returns counts only for the current tenant/KB context.
 
         Returns:
             StatusCountsResponse: A response object containing status counts
@@ -2795,11 +3229,237 @@ def create_document_routes(
             HTTPException: If an error occurs while retrieving status counts (500).
         """
         try:
+            # Use tenant-specific RAG for document status counts
             status_counts = await tenant_rag.doc_status.get_all_status_counts()
             return StatusCountsResponse(status_counts=status_counts)
 
         except Exception as e:
             logger.error(f"Error getting document status counts: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.post(
+        "/reset_status",
+        response_model=ResetDocumentStatusResponse,
+        dependencies=[Depends(combined_auth)],
+    )
+    async def reset_document_status(
+        request: ResetDocumentStatusRequest,
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
+    ):
+        """
+        Reset document status to allow reprocessing.
+
+        This endpoint allows resetting document status from any state to either:
+        - PENDING: For documents you want to retry processing
+        - FAILED: For documents stuck in PROCESSING that you want to mark as failed
+
+        This is useful for:
+        - Recovering documents stuck in PROCESSING state after server crashes
+        - Retrying failed documents after fixing the underlying issue
+        - Manually marking documents as failed for cleanup
+
+        Args:
+            request: ResetDocumentStatusRequest containing doc_ids and target_status
+            tenant_rag: Tenant-specific RAG instance (injected dependency)
+
+        Returns:
+            ResetDocumentStatusResponse: Response with status, message, and counts
+
+        Raises:
+            HTTPException: If an error occurs while resetting status (500).
+        """
+        from datetime import datetime, timezone
+
+        try:
+            reset_count = 0
+            failed_ids = []
+            target_status = (
+                DocStatus.PENDING
+                if request.target_status == "pending"
+                else DocStatus.FAILED
+            )
+
+            for doc_id in request.doc_ids:
+                try:
+                    # Get current document status
+                    current_status = await tenant_rag.doc_status.get_by_id(doc_id)
+
+                    if current_status is None:
+                        logger.warning(
+                            f"Document {doc_id} not found in doc_status storage"
+                        )
+                        failed_ids.append(doc_id)
+                        continue
+
+                    # Update status - current_status is a dict, not an object
+                    updated_data = {
+                        doc_id: {
+                            "status": target_status,
+                            "content_summary": current_status.get(
+                                "content_summary", ""
+                            ),
+                            "content_length": current_status.get("content_length", 0),
+                            "created_at": current_status.get("created_at"),
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                            "file_path": current_status.get("file_path", ""),
+                            "track_id": current_status.get("track_id"),
+                            "chunks_count": current_status.get("chunks_count"),
+                            "error_msg": None
+                            if target_status == DocStatus.PENDING
+                            else f"Manually reset to {target_status.value}",
+                        }
+                    }
+
+                    await tenant_rag.doc_status.upsert(updated_data)
+                    reset_count += 1
+                    logger.info(
+                        f"Reset document {doc_id} status to {target_status.value}"
+                    )
+
+                except Exception as e:
+                    logger.error(f"Failed to reset document {doc_id}: {e}")
+                    failed_ids.append(doc_id)
+
+            # Determine overall status
+            if reset_count == len(request.doc_ids):
+                status = "success"
+                message = f"Successfully reset {reset_count} document(s) to {request.target_status} status"
+            elif reset_count > 0:
+                status = "partial"
+                message = f"Reset {reset_count} of {len(request.doc_ids)} documents. {len(failed_ids)} failed."
+            else:
+                status = "failed"
+                message = "Failed to reset any documents. Check document IDs."
+
+            return ResetDocumentStatusResponse(
+                status=status,
+                message=message,
+                reset_count=reset_count,
+                failed_ids=failed_ids,
+            )
+
+        except Exception as e:
+            logger.error(f"Error resetting document status: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.post(
+        "/reprocess_failed",
+        response_model=ReprocessResponse,
+        dependencies=[Depends(combined_auth)],
+    )
+    async def reprocess_failed_documents(
+        background_tasks: BackgroundTasks,
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
+    ):
+        """
+        Reprocess failed and pending documents.
+
+        This endpoint triggers the document processing pipeline which automatically
+        picks up and reprocesses documents in the following statuses:
+        - FAILED: Documents that failed during previous processing attempts
+        - PENDING: Documents waiting to be processed
+        - PROCESSING: Documents with abnormally terminated processing (e.g., server crashes)
+
+        This is useful for recovering from server crashes, network errors, LLM service
+        outages, or other temporary failures that caused document processing to fail.
+
+        The processing happens in the background and can be monitored by checking the
+        pipeline status. The reprocessed documents retain their original track_id from
+        initial upload, so use their original track_id to monitor progress.
+
+        Args:
+            background_tasks: FastAPI BackgroundTasks for async processing
+            tenant_rag: Tenant-specific RAG instance (injected dependency)
+
+        Returns:
+            ReprocessResponse: Response with status and message.
+                track_id is always empty string because reprocessed documents retain
+                their original track_id from initial upload.
+
+        Raises:
+            HTTPException: If an error occurs while initiating reprocessing (500).
+        """
+        try:
+            # Start the reprocessing in the background (use tenant-specific RAG)
+            # Note: Reprocessed documents retain their original track_id from initial upload
+            background_tasks.add_task(tenant_rag.apipeline_process_enqueue_documents)
+            logger.info("Reprocessing of failed documents initiated")
+
+            return ReprocessResponse(
+                status="reprocessing_started",
+                message="Reprocessing of failed documents has been initiated in background. Documents retain their original track_id.",
+            )
+
+        except Exception as e:
+            logger.error(f"Error initiating reprocessing of failed documents: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @router.post(
+        "/cancel_pipeline",
+        response_model=CancelPipelineResponse,
+        dependencies=[Depends(combined_auth)],
+    )
+    async def cancel_pipeline(tenant_rag: LightRAG = Depends(get_tenant_rag)):
+        """
+        Request cancellation of the currently running pipeline.
+
+        This endpoint sets a cancellation flag in the pipeline status. The pipeline will:
+        1. Check this flag at key processing points
+        2. Stop processing new documents
+        3. Cancel all running document processing tasks
+        4. Mark all PROCESSING documents as FAILED with reason "User cancelled"
+
+        The cancellation is graceful and ensures data consistency. Documents that have
+        completed processing will remain in PROCESSED status.
+
+        Args:
+            tenant_rag: Tenant-specific RAG instance (injected dependency)
+
+        Returns:
+            CancelPipelineResponse: Response with status and message
+                - status="cancellation_requested": Cancellation flag has been set
+                - status="not_busy": Pipeline is not currently running
+
+        Raises:
+            HTTPException: If an error occurs while setting cancellation flag (500).
+        """
+        try:
+            from lightrag.kg.shared_storage import (
+                get_namespace_data,
+                get_namespace_lock,
+            )
+
+            pipeline_status = await get_namespace_data(
+                "pipeline_status", workspace=tenant_rag.workspace
+            )
+            pipeline_status_lock = get_namespace_lock(
+                "pipeline_status", workspace=tenant_rag.workspace
+            )
+
+            async with pipeline_status_lock:
+                if not pipeline_status.get("busy", False):
+                    return CancelPipelineResponse(
+                        status="not_busy",
+                        message="Pipeline is not currently running. No cancellation needed.",
+                    )
+
+                # Set cancellation flag
+                pipeline_status["cancellation_requested"] = True
+                cancel_msg = "Pipeline cancellation requested by user"
+                logger.info(cancel_msg)
+                pipeline_status["latest_message"] = cancel_msg
+                pipeline_status["history_messages"].append(cancel_msg)
+
+            return CancelPipelineResponse(
+                status="cancellation_requested",
+                message="Pipeline cancellation has been requested. Documents will be marked as FAILED.",
+            )
+
+        except Exception as e:
+            logger.error(f"Error requesting pipeline cancellation: {str(e)}")
             logger.error(traceback.format_exc())
             raise HTTPException(status_code=500, detail=str(e))
 

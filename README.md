@@ -51,24 +51,25 @@
 
 ---
 ## 🎉 News
-- [X] [2025.06.16]🎯📢Our team has released [RAG-Anything](https://github.com/HKUDS/RAG-Anything) an All-in-One Multimodal RAG System for seamless text, image, table, and equation processing.
-- [X] [2025.06.05]🎯📢LightRAG now supports comprehensive multimodal data handling through [RAG-Anything](https://github.com/HKUDS/RAG-Anything) integration, enabling seamless document parsing and RAG capabilities across diverse formats including PDFs, images, Office documents, tables, and formulas. Please refer to the new [multimodal section](https://github.com/HKUDS/LightRAG/?tab=readme-ov-file#multimodal-document-processing-rag-anything-integration) for details.
-- [X] [2025.03.18]🎯📢LightRAG now supports citation functionality, enabling proper source attribution.
-- [X] [2025.02.05]🎯📢Our team has released [VideoRAG](https://github.com/HKUDS/VideoRAG) understanding extremely long-context videos.
-- [X] [2025.01.13]🎯📢Our team has released [MiniRAG](https://github.com/HKUDS/MiniRAG) making RAG simpler with small models.
-- [X] [2025.01.06]🎯📢You can now [use PostgreSQL for Storage](#using-postgresql-for-storage).
-- [X] [2024.12.31]🎯📢LightRAG now supports [deletion by document ID](https://github.com/HKUDS/LightRAG?tab=readme-ov-file#delete).
-- [X] [2024.11.25]🎯📢LightRAG now supports seamless integration of [custom knowledge graphs](https://github.com/HKUDS/LightRAG?tab=readme-ov-file#insert-custom-kg), empowering users to enhance the system with their own domain expertise.
-- [X] [2024.11.19]🎯📢A comprehensive guide to LightRAG is now available on [LearnOpenCV](https://learnopencv.com/lightrag). Many thanks to the blog author.
-- [X] [2024.11.11]🎯📢LightRAG now supports [deleting entities by their names](https://github.com/HKUDS/LightRAG?tab=readme-ov-file#delete).
-- [X] [2024.11.09]🎯📢Introducing the [LightRAG Gui](https://lightrag-gui.streamlit.app), which allows you to insert, query, visualize, and download LightRAG knowledge.
-- [X] [2024.11.04]🎯📢You can now [use Neo4J for Storage](https://github.com/HKUDS/LightRAG?tab=readme-ov-file#using-neo4j-for-storage).
-- [X] [2024.10.29]🎯📢LightRAG now supports multiple file types, including PDF, DOC, PPT, and CSV via `textract`.
-- [X] [2024.10.20]🎯📢We've added a new feature to LightRAG: Graph Visualization.
-- [X] [2024.10.18]🎯📢We've added a link to a [LightRAG Introduction Video](https://youtu.be/oageL-1I0GE). Thanks to the author!
-- [X] [2024.10.17]🎯📢We have created a [Discord channel](https://discord.gg/yF2MmDJyGJ)! Welcome to join for sharing and discussions! 🎉🎉
-- [X] [2024.10.16]🎯📢LightRAG now supports [Ollama models](https://github.com/HKUDS/LightRAG?tab=readme-ov-file#quick-start)!
-- [X] [2024.10.15]🎯📢LightRAG now supports [Hugging Face models](https://github.com/HKUDS/LightRAG?tab=readme-ov-file#quick-start)!
+- [2025.12]🎯[New Feature] **Enterprise Multi-Tenant Support** contributed by [Raphaël MANSUY](https://github.com/raphaelmansuy) ([ELITIZON](https://www.elitizon.com)): Complete tenant isolation with RBAC, per-tenant knowledge bases, and full backward compatibility for single-tenant deployments.
+- [2025.11]🎯[New Feature]: Integrated **RAGAS for Evaluation** and **Langfuse for Tracing**. Updated the API to return retrieved contexts alongside query results to support context precision metrics.
+- [2025.10]🎯[Scalability Enhancement]: Eliminated processing bottlenecks to support **Large-Scale Datasets Efficiently**.
+- [2025.09]🎯[New Feature] Enhances knowledge graph extraction accuracy for **Open-Sourced LLMs** such as Qwen3-30B-A3B.
+- [2025.08]🎯[New Feature] **Reranker** is now supported, significantly boosting performance for mixed queries (set as default query mode).
+- [2025.08]🎯[New Feature] Added **Document Deletion** with automatic KG regeneration to ensure optimal query performance.
+- [2025.06]🎯[New Release] Our team has released [RAG-Anything](https://github.com/HKUDS/RAG-Anything) — an **All-in-One Multimodal RAG** system for seamless processing of text, images, tables, and equations.
+- [2025.06]🎯[New Feature] LightRAG now supports comprehensive multimodal data handling through [RAG-Anything](https://github.com/HKUDS/RAG-Anything) integration, enabling seamless document parsing and RAG capabilities across diverse formats including PDFs, images, Office documents, tables, and formulas. Please refer to the new [multimodal section](https://github.com/HKUDS/LightRAG/?tab=readme-ov-file#multimodal-document-processing-rag-anything-integration) for details.
+- [2025.03]🎯[New Feature] LightRAG now supports citation functionality, enabling proper source attribution and enhanced document traceability.
+- [2025.02]🎯[New Feature] You can now use MongoDB as an all-in-one storage solution for unified data management.
+- [2025.02]🎯[New Release] Our team has released [VideoRAG](https://github.com/HKUDS/VideoRAG)-a RAG system for understanding extremely long-context videos
+- [2025.01]🎯[New Release] Our team has released [MiniRAG](https://github.com/HKUDS/MiniRAG) making RAG simpler with small models.
+- [2025.01]🎯You can now use PostgreSQL as an all-in-one storage solution for data management.
+- [2024.11]🎯[New Resource] A comprehensive guide to LightRAG is now available on [LearnOpenCV](https://learnopencv.com/lightrag). — explore in-depth tutorials and best practices. Many thanks to the blog author for this excellent contribution!
+- [2024.11]🎯[New Feature] Introducing the LightRAG WebUI — an interface that allows you to insert, query, and visualize LightRAG knowledge through an intuitive web-based dashboard.
+- [2024.11]🎯[New Feature] You can now [use Neo4J for Storage](https://github.com/HKUDS/LightRAG?tab=readme-ov-file#using-neo4j-for-storage)-enabling graph database support.
+- [2024.10]🎯[New Feature] We've added a link to a [LightRAG Introduction Video](https://youtu.be/oageL-1I0GE). — a walkthrough of LightRAG's capabilities. Thanks to the author for this excellent contribution!
+- [2024.10]🎯[New Channel] We have created a [Discord channel](https://discord.gg/yF2MmDJyGJ)!💬 Welcome to join our community for sharing, discussions, and collaboration! 🎉🎉
+- [2024.10]🎯[New Feature] LightRAG now supports [Ollama models](https://github.com/HKUDS/LightRAG?tab=readme-ov-file#quick-start)!
 
 <details>
   <summary style="font-size: 1.4em; font-weight: bold; cursor: pointer; display: list-item;">
@@ -84,6 +85,13 @@
 
 ## Installation
 
+> **💡 Using uv for Package Management**: This project uses [uv](https://docs.astral.sh/uv/) for fast and reliable Python package management.
+> Install uv first: `curl -LsSf https://astral.sh/uv/install.sh | sh` (Unix/macOS) or `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"` (Windows)
+>
+> **Note**: You can also use pip if you prefer, but uv is recommended for better performance and more reliable dependency management.
+>
+> **📦 Offline Deployment**: For offline or air-gapped environments, see the [Offline Deployment Guide](./docs/OfflineDeployment.md) for instructions on pre-installing all dependencies and cache files.
+
 ### Install LightRAG Server
 
 The LightRAG Server is designed to provide Web UI and API support. The Web UI facilitates document indexing, knowledge graph exploration, and a simple RAG query interface. LightRAG Server also provide an Ollama compatible interfaces, aiming to emulate LightRAG as an Ollama chat model. This allows AI chat bot, such as Open WebUI, to access LightRAG easily.
@@ -91,8 +99,13 @@ The LightRAG Server is designed to provide Web UI and API support. The Web UI fa
 * Install from PyPI
 
 ```bash
-pip install "lightrag-hku[api]"
-cp env.example .env
+# Using uv (recommended)
+uv pip install "lightrag-hku[api]"
+# Or using pip
+# pip install "lightrag-hku[api]"
+
+cp env.example .env  # Update the .env with your LLM and embedding configurations
+
 lightrag-server
 ```
 
@@ -101,19 +114,35 @@ lightrag-server
 ```bash
 git clone https://github.com/HKUDS/LightRAG.git
 cd LightRAG
-# create a Python virtual enviroment if neccesary
-# Install in editable mode with API support
-pip install -e ".[api]"
-cp env.example .env
+
+# Using uv (recommended)
+# Note: uv sync automatically creates a virtual environment in .venv/
+uv sync --extra api
+source .venv/bin/activate  # Activate the virtual environment (Linux/macOS)
+# Or on Windows: .venv\Scripts\activate
+
+# Or using pip with virtual environment
+# python -m venv .venv
+# source .venv/bin/activate  # Windows: .venv\Scripts\activate
+# pip install -e ".[api]"
+
+cp env.example .env  # Update the .env with your LLM and embedding configurations
+
+# Build front-end artifacts
+cd lightrag_webui
+bun install --frozen-lockfile
+bun run build
+cd ..
+
 lightrag-server
 ```
 
 * Launching the LightRAG Server with Docker Compose
 
-```
+```bash
 git clone https://github.com/HKUDS/LightRAG.git
 cd LightRAG
-cp env.example .env
+cp env.example .env  # Update the .env with your LLM and embedding configurations
 # modify LLM and Embedding settings in .env
 docker compose up
 ```
@@ -122,22 +151,26 @@ docker compose up
 
 ### Install  LightRAG Core
 
-* Install from source (Recommend)
+* Install from source (Recommended)
 
 ```bash
 cd LightRAG
-pip install -e .
+# Note: uv sync automatically creates a virtual environment in .venv/
+uv sync
+source .venv/bin/activate  # Activate the virtual environment (Linux/macOS)
+# Or on Windows: .venv\Scripts\activate
+
+# Or: pip install -e .
 ```
 
 * Install from PyPI
 
 ```bash
-pip install lightrag-hku
+uv pip install lightrag-hku
+# Or: pip install lightrag-hku
 ```
 
 ## Quick Start
-
-> 🚀 **Recommended for Most Users**: LightRAG uses **OpenAI by default** for optimal performance. See [OPENAI_CONFIGURATION.md](./OPENAI_CONFIGURATION.md) for a complete setup guide (5-minute quick start included).
 
 ### LLM and Technology Stack Requirements for LightRAG
 
@@ -182,16 +215,13 @@ For a streaming response implementation example, please see `examples/lightrag_o
 
 **Note 2**: Only `lightrag_openai_demo.py` and `lightrag_openai_compatible_demo.py` are officially supported sample codes. Other sample files are community contributions that haven't undergone full testing and optimization.
 
-## Programing with LightRAG Core
+## Programming with LightRAG Core
 
 > ⚠️ **If you would like to integrate LightRAG into your project, we recommend utilizing the REST API provided by the LightRAG Server**. LightRAG Core is typically intended for embedded applications or for researchers who wish to conduct studies and evaluations.
 
 ### ⚠️ Important: Initialization Requirements
 
-**LightRAG requires explicit initialization before use.** You must call both `await rag.initialize_storages()` and `await initialize_pipeline_status()` after creating a LightRAG instance, otherwise you will encounter errors like:
-
-- `AttributeError: __aenter__` - if storages are not initialized
-- `KeyError: 'history_messages'` - if pipeline status is not initialized
+**LightRAG requires explicit initialization before use.** You must call `await rag.initialize_storages()` after creating a LightRAG instance, otherwise you will encounter errors.
 
 ### A Simple Program
 
@@ -202,7 +232,6 @@ import os
 import asyncio
 from lightrag import LightRAG, QueryParam
 from lightrag.llm.openai import gpt_4o_mini_complete, gpt_4o_complete, openai_embed
-from lightrag.kg.shared_storage import initialize_pipeline_status
 from lightrag.utils import setup_logger
 
 setup_logger("lightrag", level="INFO")
@@ -218,9 +247,7 @@ async def initialize_rag():
         llm_model_func=gpt_4o_mini_complete,
     )
     # IMPORTANT: Both initialization calls are required!
-    await rag.initialize_storages()  # Initialize storage backends
-    await initialize_pipeline_status()  # Initialize processing pipeline
-    return rag
+    await rag.initialize_storages()  # Initialize storage backends    return rag
 
 async def main():
     try:
@@ -287,7 +314,7 @@ A full list of LightRAG init parameters:
 | **vector_db_storage_cls_kwargs** | `dict` | Additional parameters for vector database, like setting the threshold for nodes and relations retrieval | cosine_better_than_threshold: 0.2（default value changed by env var COSINE_THRESHOLD) |
 | **enable_llm_cache** | `bool` | If `TRUE`, stores LLM results in cache; repeated prompts return cached responses | `TRUE` |
 | **enable_llm_cache_for_entity_extract** | `bool` | If `TRUE`, stores LLM results in cache for entity extraction; Good for beginners to debug your application | `TRUE` |
-| **addon_params** | `dict` | Additional parameters, e.g., `{"language": "Simplified Chinese", "entity_types": ["organization", "person", "location", "event"]}`: sets example limit, entiy/relation extraction output language | language: English` |
+| **addon_params** | `dict` | Additional parameters, e.g., `{"language": "Simplified Chinese", "entity_types": ["organization", "person", "location", "event"]}`: sets example limit, entity/relation extraction output language | language: English` |
 | **embedding_cache_config** | `dict` | Configuration for question-answer caching. Contains three parameters: `enabled`: Boolean value to enable/disable cache lookup functionality. When enabled, the system will check cached responses before generating new answers. `similarity_threshold`: Float value (0-1), similarity threshold. When a new question's similarity with a cached question exceeds this threshold, the cached answer will be returned directly without calling the LLM. `use_llm_check`: Boolean value to enable/disable LLM similarity verification. When enabled, LLM will be used as a secondary check to verify the similarity between questions before returning cached answers. | Default: `{"enabled": False, "similarity_threshold": 0.95, "use_llm_check": False}` |
 
 </details>
@@ -338,7 +365,7 @@ class QueryParam:
     max_total_tokens: int = int(os.getenv("MAX_TOTAL_TOKENS", "30000"))
     """Maximum total tokens budget for the entire query context (entities + relations + chunks + system prompt)."""
 
-    # History mesages is only send to LLM for context, not used for retrieval
+    # History messages are only sent to LLM for context, not used for retrieval
     conversation_history: list[dict[str, str]] = field(default_factory=list)
     """Stores past conversation history to maintain context.
     Format: [{"role": "user/assistant", "content": "message"}].
@@ -377,6 +404,11 @@ LightRAG requires the utilization of LLM and Embedding models to accomplish docu
 * LightRAG also supports Open AI-like chat/embeddings APIs:
 
 ```python
+import os
+import numpy as np
+from lightrag.utils import wrap_embedding_func_with_attrs
+from lightrag.llm.openai import openai_complete_if_cache, openai_embed
+
 async def llm_model_func(
     prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
 ) -> str:
@@ -390,8 +422,9 @@ async def llm_model_func(
         **kwargs
     )
 
+@wrap_embedding_func_with_attrs(embedding_dim=4096, max_token_size=8192)
 async def embedding_func(texts: list[str]) -> np.ndarray:
-    return await openai_embed(
+    return await openai_embed.func(
         texts,
         model="solar-embedding-1-large-query",
         api_key=os.getenv("UPSTAGE_API_KEY"),
@@ -402,17 +435,16 @@ async def initialize_rag():
     rag = LightRAG(
         working_dir=WORKING_DIR,
         llm_model_func=llm_model_func,
-        embedding_func=EmbeddingFunc(
-            embedding_dim=4096,
-            func=embedding_func
-        )
+        embedding_func=embedding_func  # Pass the decorated function directly
     )
 
     await rag.initialize_storages()
-    await initialize_pipeline_status()
-
     return rag
 ```
+
+> **Important Note on Embedding Function Wrapping:**
+>
+> `EmbeddingFunc` cannot be nested. Functions that have been decorated with `@wrap_embedding_func_with_attrs` (such as `openai_embed`, `ollama_embed`, etc.) cannot be wrapped again using `EmbeddingFunc()`. This is why we call `xxx_embed.func` (the underlying unwrapped function) instead of `xxx_embed` directly when creating custom embedding functions.
 
 </details>
 
@@ -452,19 +484,20 @@ If you want to use Ollama models, you need to pull model you plan to use and emb
 Then you only need to set LightRAG as follows:
 
 ```python
+import numpy as np
+from lightrag.utils import wrap_embedding_func_with_attrs
+from lightrag.llm.ollama import ollama_model_complete, ollama_embed
+
+@wrap_embedding_func_with_attrs(embedding_dim=768, max_token_size=8192)
+async def embedding_func(texts: list[str]) -> np.ndarray:
+    return await ollama_embed.func(texts, embed_model="nomic-embed-text")
+
 # Initialize LightRAG with Ollama model
 rag = LightRAG(
     working_dir=WORKING_DIR,
     llm_model_func=ollama_model_complete,  # Use Ollama model for text generation
     llm_model_name='your_model_name', # Your model name
-    # Use Ollama embedding function
-    embedding_func=EmbeddingFunc(
-        embedding_dim=768,
-        func=lambda texts: ollama_embed(
-            texts,
-            embed_model="nomic-embed-text"
-        )
-    ),
+    embedding_func=embedding_func,  # Pass the decorated function directly
 )
 ```
 
@@ -503,21 +536,26 @@ ollama create -f Modelfile qwen2m
 Tiy can use `llm_model_kwargs` param to configure ollama:
 
 ```python
+import numpy as np
+from lightrag.utils import wrap_embedding_func_with_attrs
+from lightrag.llm.ollama import ollama_model_complete, ollama_embed
+
+@wrap_embedding_func_with_attrs(embedding_dim=768, max_token_size=8192)
+async def embedding_func(texts: list[str]) -> np.ndarray:
+    return await ollama_embed.func(texts, embed_model="nomic-embed-text")
+
 rag = LightRAG(
     working_dir=WORKING_DIR,
     llm_model_func=ollama_model_complete,  # Use Ollama model for text generation
     llm_model_name='your_model_name', # Your model name
     llm_model_kwargs={"options": {"num_ctx": 32768}},
-    # Use Ollama embedding function
-    embedding_func=EmbeddingFunc(
-        embedding_dim=768,
-        func=lambda texts: ollama_embed(
-            texts,
-            embed_model="nomic-embed-text"
-        )
-    ),
+    embedding_func=embedding_func,  # Pass the decorated function directly
 )
 ```
+
+> **Important Note on Embedding Function Wrapping:**
+>
+> `EmbeddingFunc` cannot be nested. Functions that have been decorated with `@wrap_embedding_func_with_attrs` (such as `openai_embed`, `ollama_embed`, etc.) cannot be wrapped again using `EmbeddingFunc()`. This is why we call `xxx_embed.func` (the underlying unwrapped function) instead of `xxx_embed` directly when creating custom embedding functions.
 
 * **Low RAM GPUs**
 
@@ -541,7 +579,6 @@ from lightrag import LightRAG
 from lightrag.llm.llama_index_impl import llama_index_complete_if_cache, llama_index_embed
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.llms.openai import OpenAI
-from lightrag.kg.shared_storage import initialize_pipeline_status
 from lightrag.utils import setup_logger
 
 # Setup log handler for LightRAG
@@ -558,8 +595,6 @@ async def initialize_rag():
     )
 
     await rag.initialize_storages()
-    await initialize_pipeline_status()
-
     return rag
 
 def main():
@@ -811,8 +846,6 @@ async def initialize_rag():
     # Initialize database connections
     await rag.initialize_storages()
     # Initialize pipeline status for document processing
-    await initialize_pipeline_status()
-
     return rag
 ```
 
@@ -826,7 +859,7 @@ see test_neo4j.py for a working example.
 For production level scenarios you will most likely want to leverage an enterprise solution. PostgreSQL can provide a one-stop solution for you as KV store, VectorDB (pgvector) and GraphDB (apache AGE). PostgreSQL version 16.6 or higher is supported.
 
 * PostgreSQL is lightweight,the whole binary distribution including all necessary plugins can be zipped to 40MB: Ref to [Windows Release](https://github.com/ShanGor/apache-age-windows/releases/tag/PG17%2Fv1.5.0-rc0) as it is easy to install for Linux/Mac.
-* If you prefer docker, please start with this image if you are a beginner to avoid hiccups (DO read the overview): https://hub.docker.com/r/shangor/postgres-for-rag
+* If you prefer docker, please start with this image if you are a beginner to avoid hiccups (Default user password:rag/rag): https://hub.docker.com/r/gzdaniel/postgres-for-rag
 * How to start? Ref to: [examples/lightrag_zhipu_postgres_demo.py](https://github.com/HKUDS/LightRAG/blob/main/examples/lightrag_zhipu_postgres_demo.py)
 * For high-performance graph database requirements, Neo4j is recommended as Apache AGE's performance is not as competitive.
 
@@ -897,8 +930,6 @@ async def initialize_rag():
     # Initialize database connections
     await rag.initialize_storages()
     # Initialize pipeline status for document processing
-    await initialize_pipeline_status()
-
     return rag
 ```
 
@@ -933,11 +964,153 @@ maxclients 500
 The `workspace` parameter ensures data isolation between different LightRAG instances. Once initialized, the `workspace` is immutable and cannot be changed.Here is how workspaces are implemented for different types of storage:
 
 - **For local file-based databases, data isolation is achieved through workspace subdirectories:** `JsonKVStorage`, `JsonDocStatusStorage`, `NetworkXStorage`, `NanoVectorDBStorage`, `FaissVectorDBStorage`.
-- **For databases that store data in collections, it's done by adding a workspace prefix to the collection name:** `RedisKVStorage`, `RedisDocStatusStorage`, `MilvusVectorDBStorage`, `QdrantVectorDBStorage`, `MongoKVStorage`, `MongoDocStatusStorage`, `MongoVectorDBStorage`, `MongoGraphStorage`, `PGGraphStorage`.
+- **For databases that store data in collections, it's done by adding a workspace prefix to the collection name:** `RedisKVStorage`, `RedisDocStatusStorage`, `MilvusVectorDBStorage`, `MongoKVStorage`, `MongoDocStatusStorage`, `MongoVectorDBStorage`, `MongoGraphStorage`, `PGGraphStorage`.
+- **For Qdrant vector database, data isolation is achieved through payload-based partitioning (Qdrant's recommended multitenancy approach):** `QdrantVectorDBStorage` uses shared collections with payload filtering for unlimited workspace scalability.
 - **For relational databases, data isolation is achieved by adding a `workspace` field to the tables for logical data separation:** `PGKVStorage`, `PGVectorStorage`, `PGDocStatusStorage`.
 - **For the Neo4j graph database, logical data isolation is achieved through labels:** `Neo4JStorage`
 
 To maintain compatibility with legacy data, the default workspace for PostgreSQL non-graph storage is `default` and, for PostgreSQL AGE graph storage is null, for Neo4j graph storage is `base` when no workspace is configured. For all external storages, the system provides dedicated workspace environment variables to override the common `WORKSPACE` environment variable configuration. These storage-specific workspace environment variables are: `REDIS_WORKSPACE`, `MILVUS_WORKSPACE`, `QDRANT_WORKSPACE`, `MONGODB_WORKSPACE`, `POSTGRES_WORKSPACE`, `NEO4J_WORKSPACE`.
+
+### 🏢 Enterprise Multi-Tenant Mode
+
+> **Contributed by [Raphaël MANSUY](https://github.com/raphaelmansuy) ([ELITIZON](https://www.elitizon.com))**
+
+LightRAG supports enterprise-grade multi-tenancy with complete data isolation, role-based access control (RBAC), and per-tenant knowledge bases. This enables SaaS deployments where multiple organizations share the same infrastructure while maintaining strict data boundaries.
+
+#### Operating Modes
+
+| Mode | Environment Variable | Description |
+|------|---------------------|-------------|
+| **Single-Tenant** (Default) | `LIGHTRAG_MULTI_TENANT=false` | Backward-compatible mode. Works exactly like the original LightRAG. No tenant context required. |
+| **Multi-Tenant** | `LIGHTRAG_MULTI_TENANT=true` | Enables tenant/KB selection in WebUI. API requests can optionally include tenant context. |
+| **Multi-Tenant Strict** | `LIGHTRAG_MULTI_TENANT_STRICT=true` | All API requests MUST include tenant context (`X-Tenant-ID`, `X-KB-ID` headers). |
+
+#### Quick Start
+
+1. **Enable multi-tenant mode** in your `.env`:
+
+```bash
+# Enable multi-tenant mode
+LIGHTRAG_MULTI_TENANT=true
+
+# Optional: Require tenant context on all requests
+# LIGHTRAG_MULTI_TENANT_STRICT=true
+```
+
+2. **Start the server**:
+
+```bash
+lightrag-server
+```
+
+3. **Create a tenant via API**:
+
+```bash
+curl -X POST http://localhost:9621/api/tenants \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id": "acme-corp", "tenant_name": "ACME Corporation"}'
+```
+
+4. **Create a knowledge base**:
+
+```bash
+curl -X POST http://localhost:9621/api/tenants/acme-corp/kbs \
+  -H "Content-Type: application/json" \
+  -d '{"kb_id": "product-docs", "kb_name": "Product Documentation"}'
+```
+
+5. **Use tenant context in requests**:
+
+```bash
+# Insert document with tenant context
+curl -X POST http://localhost:9621/documents/text \
+  -H "X-Tenant-ID: acme-corp" \
+  -H "X-KB-ID: product-docs" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Your document content here..."}'
+
+# Query with tenant context
+curl -X POST http://localhost:9621/query \
+  -H "X-Tenant-ID: acme-corp" \
+  -H "X-KB-ID: product-docs" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is the product about?"}'
+```
+
+#### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    LightRAG Multi-Tenant                     │
+├─────────────────────────────────────────────────────────────┤
+│  Tenant: acme-corp          │  Tenant: globex-inc           │
+│  ┌─────────────────────┐    │  ┌─────────────────────┐      │
+│  │ KB: product-docs    │    │  │ KB: research        │      │
+│  │ KB: internal-wiki   │    │  │ KB: compliance      │      │
+│  └─────────────────────┘    │  └─────────────────────┘      │
+├─────────────────────────────────────────────────────────────┤
+│              Shared Infrastructure (Isolated Data)           │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐     │
+│  │ KV Store │  │ VectorDB │  │ GraphDB  │  │DocStatus │     │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Role-Based Access Control (RBAC)
+
+| Role | Permissions |
+|------|------------|
+| `admin` | Full access: manage tenant, members, KBs, documents, queries |
+| `editor` | Create/delete KBs, manage documents, run queries |
+| `viewer` | Read documents, run queries |
+| `viewer:read-only` | Run queries only |
+
+#### Backward Compatibility
+
+**No breaking changes for existing deployments:**
+
+- With `LIGHTRAG_MULTI_TENANT=false` (default), LightRAG works exactly as before
+- Existing data and APIs remain fully compatible
+- The `workspace` parameter continues to work for basic data isolation
+- Multi-tenant mode is opt-in and requires explicit configuration
+
+#### Tenant Configuration Options
+
+Each tenant can have custom configuration:
+
+```python
+TenantConfig(
+    # Model selection per tenant
+    llm_model="gpt-4o-mini",
+    embedding_model="bge-m3:latest",
+    rerank_model="jina-reranker-v2-base-multilingual",
+    
+    # Query defaults
+    top_k=40,
+    cosine_threshold=0.2,
+    
+    # Resource quotas
+    max_documents=10000,
+    max_storage_gb=100.0,
+    max_concurrent_queries=10,
+)
+```
+
+#### Storage Isolation
+
+All 19 storage backends implement multi-tenant isolation:
+
+- **File-based**: Workspace subdirectory isolation
+- **Collection-based** (MongoDB, Milvus): Namespace prefixes
+- **Relational** (PostgreSQL): Workspace column filtering
+- **Graph** (Neo4j, Memgraph): Node label isolation
+- **Vector** (Qdrant): Payload-based partitioning
+
+For detailed multi-tenant API documentation, see [LightRAG Server API](./lightrag/api/README.md).
+
+### AGENTS.md -- Guiding Coding Agents
+
+AGENTS.md is a simple, open format for guiding coding agents (https://agents.md/). It is a dedicated, predictable place to provide the context and instructions to help AI coding agents work on LightRAG project. Different AI coders should not maintain separate guidance files individually. If any AI coder cannot automatically recognize AGENTS.md, symbolic links can be used as a solution. After establishing symbolic links, you can prevent them from being committed to the Git repository by configuring your local `.gitignore_global`.
 
 ## Edit Entities and Relations
 
@@ -1501,16 +1674,13 @@ If you encounter these errors when using LightRAG:
 
 2. **`KeyError: 'history_messages'`**
    - **Cause**: Pipeline status not initialized
-   - **Solution**: Call `await initialize_pipeline_status()` after initializing storages
-
+   - **Solution**: Call `
 3. **Both errors in sequence**
    - **Cause**: Neither initialization method was called
    - **Solution**: Always follow this pattern:
    ```python
    rag = LightRAG(...)
-   await rag.initialize_storages()
-   await initialize_pipeline_status()
-   ```
+   await rag.initialize_storages()   ```
 
 ### Model Switching Issues
 
@@ -1526,6 +1696,54 @@ The LightRAG Server offers a comprehensive knowledge graph visualization feature
 
 ![iShot_2025-03-23_12.40.08](./README.assets/iShot_2025-03-23_12.40.08.png)
 
+## Langfuse observability integration
+
+Langfuse provides a drop-in replacement for the OpenAI client that automatically tracks all LLM interactions, enabling developers to monitor, debug, and optimize their RAG systems without code changes.
+
+### Installation with Langfuse option
+
+```
+pip install lightrag-hku
+pip install lightrag-hku[observability]
+
+# Or install from source code with debug mode enabled
+pip install -e .
+pip install -e ".[observability]"
+```
+
+### Config Langfuse env vars
+
+modify .env file:
+
+```
+## Langfuse Observability (Optional)
+# LLM observability and tracing platform
+# Install with: pip install lightrag-hku[observability]
+# Sign up at: https://cloud.langfuse.com or self-host
+LANGFUSE_SECRET_KEY=""
+LANGFUSE_PUBLIC_KEY=""
+LANGFUSE_HOST="https://cloud.langfuse.com"  # or your self-hosted instance
+LANGFUSE_ENABLE_TRACE=true
+```
+
+### Langfuse Usage
+
+Once installed and configured, Langfuse automatically traces all OpenAI LLM calls. Langfuse dashboard features include:
+
+- **Tracing**: View complete LLM call chains
+- **Analytics**: Token usage, latency, cost metrics
+- **Debugging**: Inspect prompts and responses
+- **Evaluation**: Compare model outputs
+- **Monitoring**: Real-time alerting
+
+### Important Notice
+
+**Note**: LightRAG currently only integrates OpenAI-compatible API calls with Langfuse. APIs such as Ollama, Azure, and AWS Bedrock are not yet supported for Langfuse observability.
+
+## RAGAS-based Evaluation
+
+**RAGAS** (Retrieval Augmented Generation Assessment) is a framework for reference-free evaluation of RAG systems using LLMs. There is an evaluation script based on RAGAS. For detailed information, please refer to [RAGAS-based Evaluation Framework](lightrag/evaluation/README.md).
+
 ## Evaluation
 
 ### Dataset
@@ -1534,7 +1752,7 @@ The dataset used in LightRAG can be downloaded from [TommyChien/UltraDomain](htt
 
 ### Generate Query
 
-LightRAG uses the following prompt to generate high-level queries, with the corresponding code in `example/generate_query.py`.
+LightRAG uses the following prompt to generate high-level queries, with the corresponding code in `examples/generate_query.py`.
 
 <details>
 <summary> Prompt </summary>

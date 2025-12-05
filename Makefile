@@ -50,6 +50,9 @@ help:
 	@echo "  $(YELLOW)make install$(NC)          Install Python + WebUI dependencies"
 	@echo "  $(YELLOW)make test$(NC)             Run tests"
 	@echo "  $(YELLOW)make lint$(NC)             Run linters"
+	@echo "  $(YELLOW)make reset-demo-tenants$(NC) Reset DB + initialize 2 demo tenants (non-interactive)"
+	@echo "  $(YELLOW)make reset-demo-tenants-dry-run$(NC) Preview the reset-demo-tenants workflow without executing it"
+	@echo "  $(YELLOW)make seed-demo-tenants$(NC) Seed (non-destructive) the demo tenants via the API script"
 	@echo ""
 	@echo "$(GREEN)$(BOLD)📡 Service URLs (when running):$(NC)"
 	@echo "  • WebUI:        $(BLUE)http://localhost:5173$(NC)"
@@ -142,6 +145,35 @@ clean-db:
 	@sleep 5
 	@docker compose -f docker-compose.dev-db.yml down -v
 	@echo "$(GREEN)✓ Database volumes removed$(NC)"
+
+# Reset the multi-tenant demo DB and seed it with two demo tenants
+.PHONY: reset-demo-tenants
+reset-demo-tenants:
+	@echo "$(BLUE)🔁 Resetting demo database and provisioning demo tenants (non-interactive)$(NC)"
+	@echo "→ This will DROP the demo database and recreate schema + demo data from 'starter' Makefile"
+	@printf 'yes\n' | make -C starter db-reset
+	@echo "→ Running API-side tenant initializer script (may wait for API to become available)"
+	@python3 scripts/init_demo_tenants.py || echo "$(YELLOW)⚠ Demo initialization may have failed. Ensure API is running and try running 'python3 scripts/init_demo_tenants.py' manually.$(NC)"
+
+# Dry-run version — prints what would happen (non-destructive). Uses make -n to preview the starter/db-reset command
+.PHONY: reset-demo-tenants-dry-run
+reset-demo-tenants-dry-run:
+	@echo "$(BLUE)🔎 Dry-run: previewing reset-demo-tenants workflow (no destructive actions will be performed)$(NC)"
+	@echo ""
+	@echo "Step 1: show db-reset command in 'starter' (dry-run)"
+	@make -n -C starter db-reset || true
+	@echo ""
+	@echo "Step 2: preview the API-side initializer script (note: script not executed in dry-run)"
+	@echo "  python3 scripts/init_demo_tenants.py"
+	@echo ""
+	@echo "Run 'make reset-demo-tenants' to actually perform the reset and seeding (destructive)."
+
+# Run only the API-side seeding script (non-destructive, does not drop DB)
+.PHONY: seed-demo-tenants
+seed-demo-tenants:
+	@echo "$(BLUE)⤴️  Seeding demo tenants via API (non-destructive)$(NC)"
+	@echo "→ This will call: python3 scripts/init_demo_tenants.py"
+	@python3 scripts/init_demo_tenants.py || echo "$(YELLOW)⚠ Seed script failed — check API accessibility or logs.$(NC)"
 
 # ============================================================================
 # SETUP & UTILITIES

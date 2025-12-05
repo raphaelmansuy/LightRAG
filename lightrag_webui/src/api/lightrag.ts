@@ -143,6 +143,21 @@ export type QueryResponse = {
   response: string
 }
 
+export type EntityUpdateResponse = {
+  status: string
+  message: string
+  data: Record<string, any>
+  operation_summary?: {
+    merged: boolean
+    merge_status: 'success' | 'failed' | 'not_attempted'
+    merge_error: string | null
+    operation_status: 'success' | 'partial_success' | 'failure'
+    target_entity: string | null
+    final_entity?: string | null
+    renamed?: boolean
+  }
+}
+
 export type DocActionResponse = {
   status: 'success' | 'partial_success' | 'failure' | 'duplicated'
   message: string
@@ -155,13 +170,31 @@ export type ScanResponse = {
   track_id: string
 }
 
+export type ReprocessFailedResponse = {
+  status: 'reprocessing_started'
+  message: string
+  track_id: string
+}
+
+export type ResetDocumentStatusRequest = {
+  doc_ids: string[]
+  target_status: 'pending' | 'failed'
+}
+
+export type ResetDocumentStatusResponse = {
+  status: 'success' | 'partial' | 'failed'
+  message: string
+  reset_count: number
+  failed_ids: string[]
+}
+
 export type DeleteDocResponse = {
   status: 'deletion_started' | 'busy' | 'not_allowed'
   message: string
   doc_id: string
 }
 
-export type DocStatus = 'pending' | 'processing' | 'processed' | 'failed'
+export type DocStatus = 'pending' | 'processing' | 'preprocessed' | 'processed' | 'failed'
 
 export type DocStatusResponse = {
   id: string
@@ -220,6 +253,7 @@ export type AuthStatusResponse = {
   access_token?: string
   token_type?: string
   auth_mode?: 'enabled' | 'disabled'
+  multi_tenant_enabled?: boolean
   message?: string
   core_version?: string
   api_version?: string
@@ -236,6 +270,7 @@ export type PipelineStatusResponse = {
   batchs: number
   cur_batch: number
   request_pending: boolean
+  cancellation_requested?: boolean
   latest_message: string
   history_messages?: string[]
   update_status?: Record<string, any>
@@ -304,6 +339,16 @@ export const scanNewDocuments = async (): Promise<ScanResponse> => {
   return response.data
 }
 
+export const reprocessFailedDocuments = async (): Promise<ReprocessFailedResponse> => {
+  const response = await axiosInstance.post('/documents/reprocess_failed')
+  return response.data
+}
+
+export const resetDocumentStatus = async (request: ResetDocumentStatusRequest): Promise<ResetDocumentStatusResponse> => {
+  const response = await axiosInstance.post('/documents/reset_status', request)
+  return response.data
+}
+
 export const getDocumentsScanProgress = async (): Promise<LightragDocumentsScanProgress> => {
   const response = await axiosInstance.get('/documents/scan-progress')
   return response.data
@@ -321,23 +366,23 @@ export const queryTextStream = async (
 ) => {
   const apiKey = useSettingsStore.getState().apiKey;
   const token = localStorage.getItem('LIGHTRAG-API-TOKEN');
-  
+
   // Get tenant context from localStorage
   const selectedTenantJson = localStorage.getItem('SELECTED_TENANT');
   const selectedKBJson = localStorage.getItem('SELECTED_KB');
-  
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Accept': 'application/x-ndjson',
   };
-  
+
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
   }
   if (apiKey) {
     headers['X-API-Key'] = apiKey;
   }
-  
+
   // Add tenant context headers
   if (selectedTenantJson) {
     try {
@@ -353,7 +398,7 @@ export const queryTextStream = async (
   } else {
     console.warn('[queryTextStream] No SELECTED_TENANT in localStorage');
   }
-  
+
   if (selectedKBJson) {
     try {
       const selectedKB = JSON.parse(selectedKBJson);
@@ -604,9 +649,13 @@ export const clearCache = async (): Promise<{
   return response.data
 }
 
-export const deleteDocuments = async (docIds: string[], deleteFile: boolean = false): Promise<DeleteDocResponse> => {
+export const deleteDocuments = async (
+  docIds: string[],
+  deleteFile: boolean = false,
+  deleteLLMCache: boolean = false
+): Promise<DeleteDocResponse> => {
   const response = await axiosInstance.delete('/documents/delete_document', {
-    data: { doc_ids: docIds, delete_file: deleteFile }
+    data: { doc_ids: docIds, delete_file: deleteFile, delete_llm_cache: deleteLLMCache }
   })
   return response.data
 }
@@ -673,6 +722,14 @@ export const getPipelineStatus = async (): Promise<PipelineStatusResponse> => {
   return response.data
 }
 
+export const cancelPipeline = async (): Promise<{
+  status: 'cancellation_requested' | 'not_busy'
+  message: string
+}> => {
+  const response = await axiosInstance.post('/documents/cancel_pipeline')
+  return response.data
+}
+
 export const loginToServer = async (username: string, password: string): Promise<LoginResponse> => {
   const formData = new FormData();
   formData.append('username', username);
@@ -692,17 +749,20 @@ export const loginToServer = async (username: string, password: string): Promise
  * @param entityName The name of the entity to update
  * @param updatedData Dictionary containing updated attributes
  * @param allowRename Whether to allow renaming the entity (default: false)
+ * @param allowMerge Whether to merge into an existing entity when renaming to a duplicate name
  * @returns Promise with the updated entity information
  */
 export const updateEntity = async (
   entityName: string,
   updatedData: Record<string, any>,
-  allowRename: boolean = false
-): Promise<DocActionResponse> => {
+  allowRename: boolean = false,
+  allowMerge: boolean = false
+): Promise<EntityUpdateResponse> => {
   const response = await axiosInstance.post('/graph/entity/edit', {
     entity_name: entityName,
     updated_data: updatedData,
-    allow_rename: allowRename
+    allow_rename: allowRename,
+    allow_merge: allowMerge
   })
   return response.data
 }

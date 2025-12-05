@@ -5,14 +5,16 @@ LightRAG FastAPI Server
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.openapi.docs import (
+    get_swagger_ui_html,
+    get_swagger_ui_oauth2_redirect_html,
+)
 import os
 import logging
 import logging.config
-import signal
 import sys
 import uvicorn
 import pipmaster as pm
-import inspect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from pathlib import Path
@@ -51,11 +53,8 @@ from lightrag.api.routers.query_routes import create_query_routes
 from lightrag.api.routers.graph_routes import create_graph_routes
 from lightrag.api.routers.ollama_api import OllamaAPI
 from lightrag.api.routers.tenant_routes import create_tenant_routes
-from lightrag.api.routers.admin_routes import create_admin_routes
 from lightrag.services.tenant_service import TenantService
 from lightrag.tenant_rag_manager import TenantRAGManager
-from lightrag.api.middleware.tenant import TenantMiddleware
-from lightrag.namespace import NameSpace
 
 from lightrag.utils import logger, set_verbose_debug
 from lightrag.kg.shared_storage import (
@@ -76,30 +75,20 @@ load_dotenv(dotenv_path=".env", override=False)
 webui_title = os.getenv("WEBUI_TITLE")
 webui_description = os.getenv("WEBUI_DESCRIPTION")
 
+# Multi-tenant mode configuration
+# Set LIGHTRAG_MULTI_TENANT=true to enable multi-tenant mode with tenant selection UI
+multi_tenant_enabled = os.getenv("LIGHTRAG_MULTI_TENANT", "false").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+
 # Initialize config parser
 config = configparser.ConfigParser()
 config.read("config.ini")
 
 # Global authentication configuration
 auth_configured = bool(auth_handler.accounts)
-
-
-def setup_signal_handlers():
-    """Setup signal handlers for graceful shutdown"""
-
-    def signal_handler(sig, frame):
-        print(f"\n\nReceived signal {sig}, shutting down gracefully...")
-        print(f"Process ID: {os.getpid()}")
-
-        # Release shared resources
-        finalize_share_data()
-
-        # Exit with success status
-        sys.exit(0)
-
-    # Register signal handlers
-    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
-    signal.signal(signal.SIGTERM, signal_handler)  # kill command
 
 
 class LLMConfigCache:
@@ -110,6 +99,7 @@ class LLMConfigCache:
 
         # Initialize configurations based on binding conditions
         self.openai_llm_options = None
+        self.gemini_llm_options = None
         self.ollama_llm_options = None
         self.ollama_embedding_options = None
 
@@ -119,6 +109,12 @@ class LLMConfigCache:
 
             self.openai_llm_options = OpenAILLMOptions.options_dict(args)
             logger.info(f"OpenAI LLM Options: {self.openai_llm_options}")
+
+        if args.llm_binding == "gemini":
+            from lightrag.llm.binding_options import GeminiLLMOptions
+
+            self.gemini_llm_options = GeminiLLMOptions.options_dict(args)
+            logger.info(f"Gemini LLM Options: {self.gemini_llm_options}")
 
         # Only initialize and log Ollama LLM options when using Ollama LLM binding
         if args.llm_binding == "ollama":
@@ -151,7 +147,141 @@ class LLMConfigCache:
                 self.ollama_embedding_options = {}
 
 
+def check_frontend_build():
+    """Check if frontend is built and optionally check if source is up-to-date
+
+    Returns:
+        bool: True if frontend is outdated, False if up-to-date or production environment
+    """
+    webui_dir = Path(__file__).parent / "webui"
+    index_html = webui_dir / "index.html"
+
+    # 1. Check if build files exist (required)
+    if not index_html.exists():
+        ASCIIColors.red("\n" + "=" * 80)
+        ASCIIColors.red("ERROR: Frontend Not Built")
+        ASCIIColors.red("=" * 80)
+        ASCIIColors.yellow("The WebUI frontend has not been built yet.")
+        ASCIIColors.yellow(
+            "Please build the frontend code first using the following commands:\n"
+        )
+        ASCIIColors.cyan("    cd lightrag_webui")
+        ASCIIColors.cyan("    bun install --frozen-lockfile")
+        ASCIIColors.cyan("    bun run build")
+        ASCIIColors.cyan("    cd ..")
+        ASCIIColors.yellow("\nThen restart the service.\n")
+        ASCIIColors.cyan(
+            "Note: Make sure you have Bun installed. Visit https://bun.sh for installation."
+        )
+        ASCIIColors.red("=" * 80 + "\n")
+        sys.exit(1)  # Exit immediately
+
+    # 2. Check if this is a development environment (source directory exists)
+    try:
+        source_dir = Path(__file__).parent.parent.parent / "lightrag_webui"
+        src_dir = source_dir / "src"
+
+        # Determine if this is a development environment: source directory exists and contains src directory
+        if not source_dir.exists() or not src_dir.exists():
+            # Production environment, skip source code check
+            logger.debug(
+                "Production environment detected, skipping source freshness check"
+            )
+            return False
+
+        # Development environment, perform source code timestamp check
+        logger.debug("Development environment detected, checking source freshness")
+
+        # Source code file extensions (files to check)
+        source_extensions = {
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".mjs",
+            ".cjs",  # TypeScript/JavaScript
+            ".css",
+            ".scss",
+            ".sass",
+            ".less",  # Style files
+            ".json",
+            ".jsonc",  # Configuration/data files
+            ".html",
+            ".htm",  # Template files
+            ".md",
+            ".mdx",  # Markdown
+        }
+
+        # Key configuration files (in lightrag_webui root directory)
+        key_files = [
+            source_dir / "package.json",
+            source_dir / "bun.lock",
+            source_dir / "vite.config.ts",
+            source_dir / "tsconfig.json",
+            source_dir / "tailraid.config.js",
+            source_dir / "index.html",
+        ]
+
+        # Get the latest modification time of source code
+        latest_source_time = 0
+
+        # Check source code files in src directory
+        for file_path in src_dir.rglob("*"):
+            if file_path.is_file():
+                # Only check source code files, ignore temporary files and logs
+                if file_path.suffix.lower() in source_extensions:
+                    mtime = file_path.stat().st_mtime
+                    latest_source_time = max(latest_source_time, mtime)
+
+        # Check key configuration files
+        for key_file in key_files:
+            if key_file.exists():
+                mtime = key_file.stat().st_mtime
+                latest_source_time = max(latest_source_time, mtime)
+
+        # Get build time
+        build_time = index_html.stat().st_mtime
+
+        # Compare timestamps (5 second tolerance to avoid file system time precision issues)
+        if latest_source_time > build_time + 5:
+            ASCIIColors.yellow("\n" + "=" * 80)
+            ASCIIColors.yellow("WARNING: Frontend Source Code Has Been Updated")
+            ASCIIColors.yellow("=" * 80)
+            ASCIIColors.yellow(
+                "The frontend source code is newer than the current build."
+            )
+            ASCIIColors.yellow(
+                "This might happen after 'git pull' or manual code changes.\n"
+            )
+            ASCIIColors.cyan(
+                "Recommended: Rebuild the frontend to use the latest changes:"
+            )
+            ASCIIColors.cyan("    cd lightrag_webui")
+            ASCIIColors.cyan("    bun install --frozen-lockfile")
+            ASCIIColors.cyan("    bun run build")
+            ASCIIColors.cyan("    cd ..")
+            ASCIIColors.yellow("\nThe server will continue with the current build.")
+            ASCIIColors.yellow("=" * 80 + "\n")
+            return True  # Frontend is outdated
+        else:
+            logger.info("Frontend build is up-to-date")
+            return False  # Frontend is up-to-date
+
+    except Exception as e:
+        # If check fails, log warning but don't affect startup
+        logger.warning(f"Failed to check frontend source freshness: {e}")
+        return False  # Assume up-to-date on error
+
+
 def create_app(args):
+    # Check frontend build first and get outdated status
+    is_frontend_outdated = check_frontend_build()
+
+    # Create unified API version display with warning symbol if frontend is outdated
+    api_version_display = (
+        f"{__api_version__}⚠️" if is_frontend_outdated else __api_version__
+    )
+
     # Setup logging
     logger.setLevel(args.log_level)
     set_verbose_debug(args.verbose)
@@ -166,6 +296,7 @@ def create_app(args):
         "openai",
         "azure_openai",
         "aws_bedrock",
+        "gemini",
     ]:
         raise Exception("llm binding not supported")
 
@@ -178,11 +309,6 @@ def create_app(args):
         "jina",
     ]:
         raise Exception("embedding binding not supported")
-    
-    # Log the configured embeddings binding for debugging
-    logger.info(f"Configured embedding binding: {args.embedding_binding}")
-    logger.info(f"Configured embedding model: {args.embedding_model}")
-    logger.info(f"Configured embedding host: {args.embedding_binding_host}")
 
     # Set default hosts if not provided
     if args.llm_binding_host is None:
@@ -219,10 +345,6 @@ def create_app(args):
             await rag.initialize_storages()
             await initialize_pipeline_status()
 
-            # Initialize tenant storage
-            if hasattr(tenant_storage, "initialize"):
-                await tenant_storage.initialize()
-
             # Data migration regardless of storage implementation
             await rag.check_and_migrate_data()
 
@@ -234,25 +356,31 @@ def create_app(args):
             # Clean up database connections
             await rag.finalize_storages()
 
-            # Clean up tenant manager
-            if hasattr(rag_manager, "cleanup_all"):
-                await rag_manager.cleanup_all()
-
-            # Clean up shared data
-            finalize_share_data()
+            if "LIGHTRAG_GUNICORN_MODE" not in os.environ:
+                # Only perform cleanup in Uvicorn single-process mode
+                logger.debug("Unvicorn Mode: finalizing shared storage...")
+                finalize_share_data()
+            else:
+                # In Gunicorn mode with preload_app=True, cleanup is handled by on_exit hooks
+                logger.debug(
+                    "Gunicorn Mode: postpone shared storage finalization to master process"
+                )
 
     # Initialize FastAPI
+    base_description = (
+        "Providing API for LightRAG core, Web UI and Ollama Model Emulation"
+    )
+    swagger_description = (
+        base_description
+        + (" (API-Key Enabled)" if api_key else "")
+        + "\n\n[View ReDoc documentation](/redoc)"
+    )
     app_kwargs = {
         "title": "LightRAG Server API",
-        "description": (
-            "Providing API for LightRAG core, Web UI and Ollama Model Emulation"
-            + "(With authentication)"
-            if api_key
-            else ""
-        ),
+        "description": swagger_description,
         "version": __api_version__,
         "openapi_url": "/openapi.json",  # Explicitly set OpenAPI schema URL
-        "docs_url": "/docs",  # Explicitly set docs URL
+        "docs_url": None,  # Disable default docs, we'll create custom endpoint
         "redoc_url": "/redoc",  # Explicitly set redoc URL
         "lifespan": lifespan,
     }
@@ -394,6 +522,44 @@ def create_app(args):
 
         return optimized_azure_openai_model_complete
 
+    def create_optimized_gemini_llm_func(
+        config_cache: LLMConfigCache, args, llm_timeout: int
+    ):
+        """Create optimized Gemini LLM function with cached configuration"""
+
+        async def optimized_gemini_model_complete(
+            prompt,
+            system_prompt=None,
+            history_messages=None,
+            keyword_extraction=False,
+            **kwargs,
+        ) -> str:
+            from lightrag.llm.gemini import gemini_complete_if_cache
+
+            if history_messages is None:
+                history_messages = []
+
+            # Use pre-processed configuration to avoid repeated parsing
+            kwargs["timeout"] = llm_timeout
+            if (
+                config_cache.gemini_llm_options is not None
+                and "generation_config" not in kwargs
+            ):
+                kwargs["generation_config"] = dict(config_cache.gemini_llm_options)
+
+            return await gemini_complete_if_cache(
+                args.llm_model,
+                prompt,
+                system_prompt=system_prompt,
+                history_messages=history_messages,
+                api_key=args.llm_binding_api_key,
+                base_url=args.llm_binding_host,
+                keyword_extraction=keyword_extraction,
+                **kwargs,
+            )
+
+        return optimized_gemini_model_complete
+
     def create_llm_model_func(binding: str):
         """
         Create LLM model function based on binding type.
@@ -415,6 +581,8 @@ def create_app(args):
                 return create_optimized_azure_openai_llm_func(
                     config_cache, args, llm_timeout
                 )
+            elif binding == "gemini":
+                return create_optimized_gemini_llm_func(config_cache, args, llm_timeout)
             else:  # openai and compatible
                 # Use optimized function with pre-processed configuration
                 return create_optimized_openai_llm_func(config_cache, args, llm_timeout)
@@ -441,14 +609,14 @@ def create_app(args):
         return {}
 
     def create_optimized_embedding_function(
-        config_cache: LLMConfigCache, binding, model, host, api_key, dimensions, args
+        config_cache: LLMConfigCache, binding, model, host, api_key, args
     ):
         """
         Create optimized embedding function with pre-processed configuration for applicable bindings.
         Uses lazy imports for all bindings and avoids repeated configuration parsing.
         """
 
-        async def optimized_embedding_function(texts):
+        async def optimized_embedding_function(texts, embedding_dim=None):
             try:
                 if binding == "lollms":
                     from lightrag.llm.lollms import lollms_embed
@@ -487,13 +655,20 @@ def create_app(args):
                     from lightrag.llm.jina import jina_embed
 
                     return await jina_embed(
-                        texts, dimensions=dimensions, base_url=host, api_key=api_key
+                        texts,
+                        embedding_dim=embedding_dim,
+                        base_url=host,
+                        api_key=api_key,
                     )
                 else:  # openai and compatible
                     from lightrag.llm.openai import openai_embed
 
                     return await openai_embed(
-                        texts, model=model, base_url=host, api_key=api_key
+                        texts,
+                        model=model,
+                        base_url=host,
+                        api_key=api_key,
+                        embedding_dim=embedding_dim,
                     )
             except ImportError as e:
                 raise Exception(f"Failed to import {binding} embedding: {e}")
@@ -533,17 +708,49 @@ def create_app(args):
         )
 
     # Create embedding function with optimized configuration
+    import inspect
+
+    # Create the optimized embedding function
+    optimized_embedding_func = create_optimized_embedding_function(
+        config_cache=config_cache,
+        binding=args.embedding_binding,
+        model=args.embedding_model,
+        host=args.embedding_binding_host,
+        api_key=args.embedding_binding_api_key,
+        args=args,  # Pass args object for fallback option generation
+    )
+
+    # Check environment variable for sending dimensions
+    embedding_send_dim = os.getenv("EMBEDDING_SEND_DIM", "false").lower() == "true"
+
+    # Check if the function signature has embedding_dim parameter
+    # Note: Since optimized_embedding_func is an async function, inspect its signature
+    sig = inspect.signature(optimized_embedding_func)
+    has_embedding_dim_param = "embedding_dim" in sig.parameters
+
+    # Determine send_dimensions value based on binding type
+    # Jina REQUIRES dimension parameter (forced to True)
+    # OpenAI and others: controlled by EMBEDDING_SEND_DIM environment variable
+    if args.embedding_binding == "jina":
+        # Jina API requires dimension parameter - always send it
+        send_dimensions = has_embedding_dim_param
+        dimension_control = "forced (Jina API requirement)"
+    else:
+        # For OpenAI and other bindings, respect EMBEDDING_SEND_DIM setting
+        send_dimensions = embedding_send_dim and has_embedding_dim_param
+        dimension_control = f"env_var={embedding_send_dim}"
+
+    logger.info(
+        f"Embedding configuration: send_dimensions={send_dimensions} "
+        f"({dimension_control}, has_param={has_embedding_dim_param}, "
+        f"binding={args.embedding_binding})"
+    )
+
+    # Create EmbeddingFunc with send_dimensions attribute
     embedding_func = EmbeddingFunc(
         embedding_dim=args.embedding_dim,
-        func=create_optimized_embedding_function(
-            config_cache=config_cache,
-            binding=args.embedding_binding,
-            model=args.embedding_model,
-            host=args.embedding_binding_host,
-            api_key=args.embedding_binding_api_key,
-            dimensions=args.embedding_dim,
-            args=args,  # Pass args object for fallback option generation
-        ),
+        func=optimized_embedding_func,
+        send_dimensions=send_dimensions,
     )
 
     # Configure rerank function based on args.rerank_bindingparameter
@@ -648,47 +855,75 @@ def create_app(args):
         logger.error(f"Failed to initialize LightRAG: {e}")
         raise
 
-    # Initialize TenantService for multi-tenant support
-    tenant_storage = rag.key_string_value_json_storage_cls(
-        namespace=NameSpace.KV_STORE_TENANTS,
-        workspace=rag.workspace,
-        embedding_func=rag.embedding_func,
-    )
-    tenant_service = TenantService(kv_storage=tenant_storage)
-    
-    # Initialize TenantRAGManager for managing per-tenant RAG instances with caching
-    # This enables efficient multi-tenant deployments by caching RAG instances
-    # Pass the main RAG instance as a template for tenant-specific instances
-    rag_manager = TenantRAGManager(
-        base_working_dir=args.working_dir,
-        tenant_service=tenant_service,
-        template_rag=rag,
-        max_cached_instances=int(os.getenv("MAX_CACHED_RAG_INSTANCES", "100"))
-    )
-    
-    # Store rag_manager in app state for dependency injection
-    app.state.rag_manager = rag_manager
-    app.include_router(create_tenant_routes(tenant_service))
-    app.include_router(create_admin_routes(tenant_service))
-    
-    # Add membership management routes
-    from lightrag.api.routers import membership_routes
-    app.include_router(membership_routes.router)
-    
+    # Initialize multi-tenant components if enabled
+    # NOTE: These are initialized here but need the db pool to be ready before use.
+    # The tenant_service uses rag.full_docs.db for database access (initialized in lifespan).
+    tenant_service = None
+    rag_manager = None
+    if multi_tenant_enabled:
+        try:
+            # Create TenantService - will use rag.full_docs for db access
+            # The db pool is initialized in the lifespan context
+            tenant_service = TenantService(rag.full_docs)
+
+            # Initialize tenant RAG manager with template RAG
+            rag_manager = TenantRAGManager(
+                base_working_dir=args.working_dir,
+                tenant_service=tenant_service,
+                template_rag=rag,
+                max_cached_instances=100,
+            )
+
+            # Store in app.state for use by dependencies
+            app.state.tenant_service = tenant_service
+            app.state.rag_manager = rag_manager
+
+            logger.info("Multi-tenant mode enabled - tenant components initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize multi-tenant components: {e}")
+            raise
+
+    # Add routes (rag_manager is passed for multi-tenant support, None for single-tenant)
     app.include_router(
         create_document_routes(
             rag,
             doc_manager,
             api_key,
-            rag_manager,
+            rag_manager=rag_manager,
         )
     )
-    app.include_router(create_query_routes(rag, api_key, args.top_k, rag_manager))
-    app.include_router(create_graph_routes(rag, api_key, rag_manager))
+    app.include_router(
+        create_query_routes(rag, api_key, args.top_k, rag_manager=rag_manager)
+    )
+    app.include_router(create_graph_routes(rag, api_key, rag_manager=rag_manager))
 
-    # Add Ollama API routes with tenant-scoped RAG support
-    ollama_api = OllamaAPI(rag, top_k=args.top_k, api_key=api_key, rag_manager=rag_manager)
+    # Add Ollama API routes
+    ollama_api = OllamaAPI(rag, top_k=args.top_k, api_key=api_key)
     app.include_router(ollama_api.router, prefix="/api")
+
+    # Add tenant routes if multi-tenant mode is enabled
+    if multi_tenant_enabled and tenant_service:
+        app.include_router(create_tenant_routes(tenant_service))
+        logger.info("Multi-tenant routes registered")
+
+    # Custom Swagger UI endpoint for offline support
+    @app.get("/docs", include_in_schema=False)
+    async def custom_swagger_ui_html():
+        """Custom Swagger UI HTML with local static files"""
+        return get_swagger_ui_html(
+            openapi_url=app.openapi_url,
+            title=app.title + " - Swagger UI",
+            oauth2_redirect_url="/docs/oauth2-redirect",
+            swagger_js_url="/static/swagger-ui/swagger-ui-bundle.js",
+            swagger_css_url="/static/swagger-ui/swagger-ui.css",
+            swagger_favicon_url="/static/swagger-ui/favicon-32x32.png",
+            swagger_ui_parameters=app.swagger_ui_parameters,
+        )
+
+    @app.get("/docs/oauth2-redirect", include_in_schema=False)
+    async def swagger_ui_redirect():
+        """OAuth2 redirect for Swagger UI"""
+        return get_swagger_ui_oauth2_redirect_html()
 
     @app.get("/")
     async def redirect_to_webui():
@@ -709,9 +944,10 @@ def create_app(args):
                 "access_token": guest_token,
                 "token_type": "bearer",
                 "auth_mode": "disabled",
+                "multi_tenant_enabled": multi_tenant_enabled,
                 "message": "Authentication is disabled. Using guest access.",
                 "core_version": core_version,
-                "api_version": __api_version__,
+                "api_version": api_version_display,
                 "webui_title": webui_title,
                 "webui_description": webui_description,
             }
@@ -719,8 +955,9 @@ def create_app(args):
         return {
             "auth_configured": True,
             "auth_mode": "enabled",
+            "multi_tenant_enabled": multi_tenant_enabled,
             "core_version": core_version,
-            "api_version": __api_version__,
+            "api_version": api_version_display,
             "webui_title": webui_title,
             "webui_description": webui_description,
         }
@@ -738,7 +975,7 @@ def create_app(args):
                 "auth_mode": "disabled",
                 "message": "Authentication is disabled. Using guest access.",
                 "core_version": core_version,
-                "api_version": __api_version__,
+                "api_version": api_version_display,
                 "webui_title": webui_title,
                 "webui_description": webui_description,
             }
@@ -746,9 +983,38 @@ def create_app(args):
         if auth_handler.accounts.get(username) != form_data.password:
             raise HTTPException(status_code=401, detail="Incorrect credentials")
 
-        # Regular user login
-        role = "admin" if username == "admin" else "user"
-        print(f"DEBUG: Login user={username}, role={role}")
+        # Determine role for this user. If the user is configured as a super-admin
+        # (via LIGHTRAG_SUPER_ADMIN_USERS or config.SUPER_ADMIN_USERS), grant the
+        # `admin` role; otherwise default to `user`.
+        role = "user"
+        try:
+            # Prefer config-level setting when available
+            from lightrag.api.config import SUPER_ADMIN_USERS
+
+            if SUPER_ADMIN_USERS:
+                super_admins = [
+                    u.strip().lower() for u in SUPER_ADMIN_USERS.split(",") if u.strip()
+                ]
+            else:
+                super_admins = []
+        except Exception:
+            # Fallback to env var (None = default 'admin', empty string = no super-admins)
+            import os
+
+            env_super_admins = os.environ.get("LIGHTRAG_SUPER_ADMIN_USERS")
+            if env_super_admins is None:
+                super_admins = ["admin"]
+            elif env_super_admins.strip():
+                super_admins = [
+                    u.strip().lower() for u in env_super_admins.split(",") if u.strip()
+                ]
+            else:
+                super_admins = []
+
+        if username and username.lower() in super_admins:
+            role = "admin"
+
+        # Regular user login (role may be 'admin' if configured)
         user_token = auth_handler.create_token(
             username=username, role=role, metadata={"auth_mode": "enabled"}
         )
@@ -757,7 +1023,7 @@ def create_app(args):
             "token_type": "bearer",
             "auth_mode": "enabled",
             "core_version": core_version,
-            "api_version": __api_version__,
+            "api_version": api_version_display,
             "webui_title": webui_title,
             "webui_description": webui_description,
         }
@@ -818,10 +1084,11 @@ def create_app(args):
                     "embedding_batch_num": args.embedding_batch_num,
                 },
                 "auth_mode": auth_mode,
+                "multi_tenant_enabled": multi_tenant_enabled,
                 "pipeline_busy": pipeline_status.get("busy", False),
                 "keyed_locks": keyed_lock_info,
                 "core_version": core_version,
-                "api_version": __api_version__,
+                "api_version": api_version_display,
                 "webui_title": webui_title,
                 "webui_description": webui_description,
             }
@@ -834,7 +1101,9 @@ def create_app(args):
         async def get_response(self, path: str, scope):
             response = await super().get_response(path, scope)
 
-            if path.endswith(".html"):
+            is_html = path.endswith(".html") or response.media_type == "text/html"
+
+            if is_html:
                 response.headers["Cache-Control"] = (
                     "no-cache, no-store, must-revalidate"
                 )
@@ -856,6 +1125,15 @@ def create_app(args):
 
             return response
 
+    # Mount Swagger UI static files for offline support
+    swagger_static_dir = Path(__file__).parent / "static" / "swagger-ui"
+    if swagger_static_dir.exists():
+        app.mount(
+            "/static/swagger-ui",
+            StaticFiles(directory=swagger_static_dir),
+            name="swagger-ui-static",
+        )
+
     # Webui mount webui/index.html
     static_dir = Path(__file__).parent / "webui"
     static_dir.mkdir(exist_ok=True)
@@ -866,9 +1144,6 @@ def create_app(args):
         ),  # Use SmartStaticFiles
         name="webui",
     )
-
-    # Add Tenant middleware
-    app.add_middleware(TenantMiddleware)
 
     return app
 
@@ -978,6 +1253,12 @@ def check_and_install_dependencies():
 
 
 def main():
+    # Explicitly initialize configuration for clarity
+    # (The proxy will auto-initialize anyway, but this makes intent clear)
+    from .config import initialize_config
+
+    initialize_config()
+
     # Check if running under Gunicorn
     if "GUNICORN_CMD_ARGS" in os.environ:
         # If started with Gunicorn, return directly as Gunicorn will call get_application
@@ -1000,8 +1281,10 @@ def main():
     update_uvicorn_mode_config()
     display_splash_screen(global_args)
 
-    # Setup signal handlers for graceful shutdown
-    setup_signal_handlers()
+    # Note: Signal handlers are NOT registered here because:
+    # - Uvicorn has built-in signal handling that properly calls lifespan shutdown
+    # - Custom signal handlers can interfere with uvicorn's graceful shutdown
+    # - Cleanup is handled by the lifespan context manager's finally block
 
     # Create application instance directly instead of using factory function
     app = create_app(global_args)

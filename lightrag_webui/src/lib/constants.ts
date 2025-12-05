@@ -1,40 +1,22 @@
 import { ButtonVariantType } from '@/components/ui/Button'
 
-// Get backend URL from environment variable, or construct it from window location
-const getBackendUrl = (): string => {
-  // First try environment variable
-  if (import.meta.env.VITE_API_BASE_URL) {
-    return import.meta.env.VITE_API_BASE_URL
-  }
-  
-  // Try to construct from current location if we're behind a reverse proxy
-  if (typeof window !== 'undefined') {
-    const protocol = window.location.protocol
-    const host = window.location.host
-    // Assume API is at :9621 on same host (standard dev port), or check if specified in environment
-    return `${protocol}//${host.split(':')[0]}:9621`
-  }
-  
-  // Fallback to localhost on port 9621 (standard development port)
-  return 'http://localhost:9621'
-}
-
-export const backendBaseUrl = getBackendUrl()
-export const webuiPrefix = '/'
+export const backendBaseUrl = ''
+export const webuiPrefix = '/webui/'
 
 export const controlButtonVariant: ButtonVariantType = 'ghost'
 
-export const labelColorDarkTheme = '#B2EBF2'
+export const labelColorDarkTheme = '#FFFFFF'
+export const LabelColorHighlightedDarkTheme = '#000000'
 export const labelColorLightTheme = '#000'
-export const LabelColorHighlightedDarkTheme = '#000'
 
 export const nodeColorDisabled = '#E2E2E2'
 export const nodeBorderColor = '#EEEEEE'
 export const nodeBorderColorSelected = '#F57F17'
 
-export const edgeColorDarkTheme = '#969696'
+export const edgeColorDarkTheme = '#888888'
 export const edgeColorSelected = '#F57F17'
-export const edgeColorHighlighted = '#B2EBF2'
+export const edgeColorHighlightedDarkTheme = '#F57F17'
+export const edgeColorHighlightedLightTheme = '#F57F17'
 
 export const searchResultLimit = 50
 export const labelListLimit = 100

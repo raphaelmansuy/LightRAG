@@ -13,6 +13,7 @@
     "api": "API",
     "projectRepository": "Project Repository",
     "logout": "Logout",
+    "frontendNeedsRebuild": "Frontend needs rebuild",
     "themeToggle": {
       "switchToLight": "Switch to light theme",
       "switchToDark": "Switch to dark theme"
@@ -70,6 +71,7 @@
       "confirmButton": "YES",
       "deleteFileOption": "Also delete uploaded files",
       "deleteFileTooltip": "Check this option to also delete the corresponding uploaded files on the server",
+      "deleteLLMCacheOption": "Also delete extracted LLM cache",
       "success": "Document deletion pipeline started successfully",
       "failed": "Delete Documents Failed:\n{{message}}",
       "error": "Delete Documents Failed:\n{{error}}",
@@ -113,18 +115,15 @@
     },
     "documentManager": {
       "title": "Document Management",
-      "scanButton": "Scan",
-      "scanTooltip": "Scan documents in input folder",
+      "scanButton": "Scan/Retry",
+      "scanTooltip": "Scan and process documents in input folder, and also reprocess all failed documents",
       "refreshTooltip": "Reset document list",
-      "pipelineStatusButton": "Pipeline Status",
-      "pipelineStatusTooltip": "View pipeline status",
+      "pipelineStatusButton": "Pipeline",
+      "pipelineStatusTooltip": "View document processing pipeline status",
       "uploadedTitle": "Uploaded Documents",
       "uploadedDescription": "List of uploaded documents and their statuses.",
-      "loading": "Loading documents...",
-      "loadingHint": "Fetching document list from the knowledge base",
-      "emptyTitle": "No Documents Yet",
-      "emptyDescription": "This knowledge base doesn't have any documents. Upload documents or scan the input folder to get started.",
-      "emptyHint": "Use the 'Scan' button above to detect new documents in the input folder",
+      "emptyTitle": "No Documents",
+      "emptyDescription": "There are no uploaded documents yet.",
       "columns": {
         "id": "ID",
         "fileName": "File Name",
@@ -140,6 +139,7 @@
       "status": {
         "all": "All",
         "completed": "Completed",
+        "preprocessed": "Preprocessed",
         "processing": "Processing",
         "pending": "Pending",
         "failed": "Failed"
@@ -147,30 +147,51 @@
       "errors": {
         "loadFailed": "Failed to load documents\n{{error}}",
         "scanFailed": "Failed to scan documents\n{{error}}",
-        "scanProgressFailed": "Failed to get scan progress\n{{error}}"
+        "scanProgressFailed": "Failed to get scan progress\n{{error}}",
+        "resetFailed": "Failed to reset document status\n{{error}}"
       },
+      "retry": "Retry",
+      "resetToPending": "Reset selected documents to pending status for retry",
+      "resetSuccess": "Successfully reset {{count}} document(s) to pending status",
+      "resetPartial": "Reset {{count}} document(s), but {{failed}} failed",
+      "resetFailed": "Failed to reset any documents",
       "fileNameLabel": "File Name",
       "showButton": "Show",
       "hideButton": "Hide",
       "showFileNameTooltip": "Show file name",
-      "hideFileNameTooltip": "Hide file name"
+      "hideFileNameTooltip": "Hide file name",
+      "loading": "Loading documents...",
+      "loadingHint": "This may take a moment",
+      "emptyWithPipelineTitle": "Processing in Progress",
+      "emptyWithPipelineDescription": "Documents are being processed in the pipeline. You can scan for new documents or view the pipeline status.",
+      "scanForDocuments": "Scan for Documents",
+      "viewPipeline": "View Pipeline",
+      "emptyHint": "Upload documents using the button above or scan for documents in the input folder."
     },
     "pipelineStatus": {
       "title": "Pipeline Status",
       "busy": "Pipeline Busy",
       "requestPending": "Request Pending",
+      "cancellationRequested": "Cancellation Requested",
       "jobName": "Job Name",
       "startTime": "Start Time",
       "progress": "Progress",
-      "unit": "batch",
-      "latestMessage": "Latest Message",
-      "historyMessages": "History Messages",
+      "unit": "Batch",
+      "pipelineMessages": "Pipeline Messages",
+      "cancelButton": "Cancel",
+      "cancelTooltip": "Cancel pipeline processing",
+      "cancelConfirmTitle": "Confirm Pipeline Cancellation",
+      "cancelConfirmDescription": "This will interrupt the ongoing pipeline processing. Are you sure you want to continue?",
+      "cancelConfirmButton": "Confirm Cancellation",
+      "cancelInProgress": "Cancellation in progress...",
+      "pipelineNotRunning": "Pipeline not running",
+      "cancelSuccess": "Pipeline cancellation requested",
+      "cancelFailed": "Failed to cancel pipeline\n{{error}}",
+      "cancelNotBusy": "Pipeline is not running, no need to cancel",
       "errors": {
-        "fetchFailed": "Failed to get pipeline status\n{{error}}"
+        "fetchFailed": "Failed to fetch pipeline status\n{{error}}"
       }
-    },
-    "selectTenant": "Please Select a Tenant and Knowledge Base",
-    "selectTenantDescription": "Choose a tenant and knowledge base from the dropdowns above to view and manage documents."
+    }
   },
   "graphPanel": {
     "dataIsTruncated": "Graph data is truncated to Max Nodes",
@@ -298,11 +319,24 @@
       "errors": {
         "duplicateName": "Node name already exists",
         "updateFailed": "Failed to update node",
-        "tryAgainLater": "Please try again later"
+        "tryAgainLater": "Please try again later",
+        "updateSuccessButMergeFailed": "Properties updated, but merge failed: {{error}}",
+        "mergeFailed": "Merge failed: {{error}}"
       },
       "success": {
         "entityUpdated": "Node updated successfully",
-        "relationUpdated": "Relation updated successfully"
+        "relationUpdated": "Relation updated successfully",
+        "entityMerged": "Nodes merged successfully"
+      },
+      "mergeOptionLabel": "Automatically merge when a duplicate name is found",
+      "mergeOptionDescription": "If enabled, renaming to an existing name will merge this node into the existing one instead of failing.",
+      "mergeDialog": {
+        "title": "Node merged",
+        "description": "\"{{source}}\" has been merged into \"{{target}}\".",
+        "refreshHint": "Refresh the graph to load the latest structure.",
+        "keepCurrentStart": "Refresh and keep current start node",
+        "useMergedStart": "Refresh and use merged node",
+        "refreshing": "Refreshing graph..."
       },
       "node": {
         "title": "Node",
@@ -320,9 +354,9 @@
           "description": "Description",
           "entity_id": "Name",
           "entity_type": "Type",
-          "source_id": "SrcID",
+          "source_id": "C-ID",
           "Neighbour": "Neigh",
-          "file_path": "Source",
+          "file_path": "File",
           "keywords": "Keys",
           "weight": "Weight"
         }
@@ -338,14 +372,14 @@
     },
     "search": {
       "placeholder": "Search nodes in page...",
-      "message": "And {count} others"
+      "message": "And {{count}} others"
     },
     "graphLabels": {
       "selectTooltip": "Get subgraph of a node (label)",
       "noLabels": "No matching nodes found",
       "label": "Search node name",
       "placeholder": "Search node name...",
-      "andOthers": "And {count} others",
+      "andOthers": "And {{count}} others",
       "refreshGlobalTooltip": "Refresh global graph data and reset search history",
       "refreshCurrentLabelTooltip": "Refresh current page graph data",
       "refreshingTooltip": "Refreshing data..."

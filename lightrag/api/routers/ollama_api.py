@@ -8,7 +8,6 @@ import re
 from enum import Enum
 from fastapi.responses import StreamingResponse
 import asyncio
-from ascii_colors import trace_exception
 from lightrag import LightRAG, QueryParam
 from lightrag.utils import TiktokenTokenizer
 from lightrag.api.utils_api import get_combined_auth_dependency
@@ -223,11 +222,11 @@ def parse_query_mode(query: str) -> tuple[str, SearchMode, bool, Optional[str]]:
 
 class OllamaAPI:
     def __init__(
-        self, 
-        rag: LightRAG, 
-        top_k: int = 60, 
+        self,
+        rag: LightRAG,
+        top_k: int = 60,
         api_key: Optional[str] = None,
-        rag_manager: Optional[TenantRAGManager] = None
+        rag_manager: Optional[TenantRAGManager] = None,
     ):
         self.rag = rag
         self.rag_manager = rag_manager
@@ -240,17 +239,24 @@ class OllamaAPI:
     def setup_routes(self):
         # Create combined auth dependency for Ollama API routes
         combined_auth = get_combined_auth_dependency(self.api_key)
-        
+
         # Create get_tenant_rag dependency for tenant-aware operations
         async def get_tenant_rag(
-            tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional)
+            tenant_context: Optional[TenantContext] = Depends(
+                get_tenant_context_optional
+            ),
         ) -> LightRAG:
             """Dependency to get tenant-specific RAG instance for Ollama operations"""
-            if self.rag_manager and tenant_context and tenant_context.tenant_id and tenant_context.kb_id:
+            if (
+                self.rag_manager
+                and tenant_context
+                and tenant_context.tenant_id
+                and tenant_context.kb_id
+            ):
                 return await self.rag_manager.get_rag_instance(
-                    tenant_context.tenant_id, 
+                    tenant_context.tenant_id,
                     tenant_context.kb_id,
-                    tenant_context.user_id
+                    tenant_context.user_id,
                 )
             return self.rag
 
@@ -310,8 +316,7 @@ class OllamaAPI:
             "/generate", dependencies=[Depends(combined_auth)], include_in_schema=True
         )
         async def generate(
-            raw_request: Request,
-            tenant_rag: LightRAG = Depends(get_tenant_rag)
+            raw_request: Request, tenant_rag: LightRAG = Depends(get_tenant_rag)
         ):
             """Handle generate completion requests acting as an Ollama model (tenant-scoped).
             For compatibility purpose, the request is not processed by LightRAG,
@@ -335,118 +340,113 @@ class OllamaAPI:
                     )
 
                     async def stream_generator():
-                        try:
-                            first_chunk_time = None
+                        first_chunk_time = None
+                        last_chunk_time = time.time_ns()
+                        total_response = ""
+
+                        # Ensure response is an async generator
+                        if isinstance(response, str):
+                            # If it's a string, send in two parts
+                            first_chunk_time = start_time
                             last_chunk_time = time.time_ns()
-                            total_response = ""
+                            total_response = response
 
-                            # Ensure response is an async generator
-                            if isinstance(response, str):
-                                # If it's a string, send in two parts
-                                first_chunk_time = start_time
-                                last_chunk_time = time.time_ns()
-                                total_response = response
+                            data = {
+                                "model": self.ollama_server_infos.LIGHTRAG_MODEL,
+                                "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
+                                "response": response,
+                                "done": False,
+                            }
+                            yield f"{json.dumps(data, ensure_ascii=False)}\n"
 
-                                data = {
+                            completion_tokens = estimate_tokens(total_response)
+                            total_time = last_chunk_time - start_time
+                            prompt_eval_time = first_chunk_time - start_time
+                            eval_time = last_chunk_time - first_chunk_time
+
+                            data = {
+                                "model": self.ollama_server_infos.LIGHTRAG_MODEL,
+                                "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
+                                "response": "",
+                                "done": True,
+                                "done_reason": "stop",
+                                "context": [],
+                                "total_duration": total_time,
+                                "load_duration": 0,
+                                "prompt_eval_count": prompt_tokens,
+                                "prompt_eval_duration": prompt_eval_time,
+                                "eval_count": completion_tokens,
+                                "eval_duration": eval_time,
+                            }
+                            yield f"{json.dumps(data, ensure_ascii=False)}\n"
+                        else:
+                            try:
+                                async for chunk in response:
+                                    if chunk:
+                                        if first_chunk_time is None:
+                                            first_chunk_time = time.time_ns()
+
+                                        last_chunk_time = time.time_ns()
+
+                                        total_response += chunk
+                                        data = {
+                                            "model": self.ollama_server_infos.LIGHTRAG_MODEL,
+                                            "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
+                                            "response": chunk,
+                                            "done": False,
+                                        }
+                                        yield f"{json.dumps(data, ensure_ascii=False)}\n"
+                            except (asyncio.CancelledError, Exception) as e:
+                                error_msg = str(e)
+                                if isinstance(e, asyncio.CancelledError):
+                                    error_msg = "Stream was cancelled by server"
+                                else:
+                                    error_msg = f"Provider error: {error_msg}"
+
+                                logger.error(f"Stream error: {error_msg}")
+
+                                # Send error message to client
+                                error_data = {
                                     "model": self.ollama_server_infos.LIGHTRAG_MODEL,
                                     "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
-                                    "response": response,
+                                    "response": f"\n\nError: {error_msg}",
+                                    "error": f"\n\nError: {error_msg}",
                                     "done": False,
                                 }
-                                yield f"{json.dumps(data, ensure_ascii=False)}\n"
+                                yield f"{json.dumps(error_data, ensure_ascii=False)}\n"
 
-                                completion_tokens = estimate_tokens(total_response)
-                                total_time = last_chunk_time - start_time
-                                prompt_eval_time = first_chunk_time - start_time
-                                eval_time = last_chunk_time - first_chunk_time
-
-                                data = {
+                                # Send final message to close the stream
+                                final_data = {
                                     "model": self.ollama_server_infos.LIGHTRAG_MODEL,
                                     "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
                                     "response": "",
                                     "done": True,
-                                    "done_reason": "stop",
-                                    "context": [],
-                                    "total_duration": total_time,
-                                    "load_duration": 0,
-                                    "prompt_eval_count": prompt_tokens,
-                                    "prompt_eval_duration": prompt_eval_time,
-                                    "eval_count": completion_tokens,
-                                    "eval_duration": eval_time,
                                 }
-                                yield f"{json.dumps(data, ensure_ascii=False)}\n"
-                            else:
-                                try:
-                                    async for chunk in response:
-                                        if chunk:
-                                            if first_chunk_time is None:
-                                                first_chunk_time = time.time_ns()
-
-                                            last_chunk_time = time.time_ns()
-
-                                            total_response += chunk
-                                            data = {
-                                                "model": self.ollama_server_infos.LIGHTRAG_MODEL,
-                                                "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
-                                                "response": chunk,
-                                                "done": False,
-                                            }
-                                            yield f"{json.dumps(data, ensure_ascii=False)}\n"
-                                except (asyncio.CancelledError, Exception) as e:
-                                    error_msg = str(e)
-                                    if isinstance(e, asyncio.CancelledError):
-                                        error_msg = "Stream was cancelled by server"
-                                    else:
-                                        error_msg = f"Provider error: {error_msg}"
-
-                                    logger.error(f"Stream error: {error_msg}")
-
-                                    # Send error message to client
-                                    error_data = {
-                                        "model": self.ollama_server_infos.LIGHTRAG_MODEL,
-                                        "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
-                                        "response": f"\n\nError: {error_msg}",
-                                        "error": f"\n\nError: {error_msg}",
-                                        "done": False,
-                                    }
-                                    yield f"{json.dumps(error_data, ensure_ascii=False)}\n"
-
-                                    # Send final message to close the stream
-                                    final_data = {
-                                        "model": self.ollama_server_infos.LIGHTRAG_MODEL,
-                                        "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
-                                        "response": "",
-                                        "done": True,
-                                    }
-                                    yield f"{json.dumps(final_data, ensure_ascii=False)}\n"
-                                    return
-                                if first_chunk_time is None:
-                                    first_chunk_time = start_time
-                                completion_tokens = estimate_tokens(total_response)
-                                total_time = last_chunk_time - start_time
-                                prompt_eval_time = first_chunk_time - start_time
-                                eval_time = last_chunk_time - first_chunk_time
-
-                                data = {
-                                    "model": self.ollama_server_infos.LIGHTRAG_MODEL,
-                                    "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
-                                    "response": "",
-                                    "done": True,
-                                    "done_reason": "stop",
-                                    "context": [],
-                                    "total_duration": total_time,
-                                    "load_duration": 0,
-                                    "prompt_eval_count": prompt_tokens,
-                                    "prompt_eval_duration": prompt_eval_time,
-                                    "eval_count": completion_tokens,
-                                    "eval_duration": eval_time,
-                                }
-                                yield f"{json.dumps(data, ensure_ascii=False)}\n"
+                                yield f"{json.dumps(final_data, ensure_ascii=False)}\n"
                                 return
+                            if first_chunk_time is None:
+                                first_chunk_time = start_time
+                            completion_tokens = estimate_tokens(total_response)
+                            total_time = last_chunk_time - start_time
+                            prompt_eval_time = first_chunk_time - start_time
+                            eval_time = last_chunk_time - first_chunk_time
 
-                        except Exception as e:
-                            trace_exception(e)
-                            raise
+                            data = {
+                                "model": self.ollama_server_infos.LIGHTRAG_MODEL,
+                                "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
+                                "response": "",
+                                "done": True,
+                                "done_reason": "stop",
+                                "context": [],
+                                "total_duration": total_time,
+                                "load_duration": 0,
+                                "prompt_eval_count": prompt_tokens,
+                                "prompt_eval_duration": prompt_eval_time,
+                                "eval_count": completion_tokens,
+                                "eval_duration": eval_time,
+                            }
+                            yield f"{json.dumps(data, ensure_ascii=False)}\n"
+                            return
 
                     return StreamingResponse(
                         stream_generator(),
@@ -488,15 +488,14 @@ class OllamaAPI:
                         "eval_duration": eval_time,
                     }
             except Exception as e:
-                trace_exception(e)
+                logger.error(f"Ollama generate error: {str(e)}", exc_info=True)
                 raise HTTPException(status_code=500, detail=str(e))
 
         @self.router.post(
             "/chat", dependencies=[Depends(combined_auth)], include_in_schema=True
         )
         async def chat(
-            raw_request: Request,
-            tenant_rag: LightRAG = Depends(get_tenant_rag)
+            raw_request: Request, tenant_rag: LightRAG = Depends(get_tenant_rag)
         ):
             """Process chat completion requests by acting as an Ollama model (tenant-scoped).
             Routes user queries through LightRAG by selecting query mode based on query prefix.
@@ -511,6 +510,12 @@ class OllamaAPI:
                 messages = request.messages
                 if not messages:
                     raise HTTPException(status_code=400, detail="No messages provided")
+
+                # Validate that the last message is from a user
+                if messages[-1].role != "user":
+                    raise HTTPException(
+                        status_code=400, detail="Last message must be from user role"
+                    )
 
                 # Get the last message as query and previous messages as history
                 query = messages[-1].content
@@ -545,7 +550,9 @@ class OllamaAPI:
                     # Determine if the request is prefix with "/bypass"
                     if mode == SearchMode.bypass:
                         if request.system:
-                            tenant_rag.llm_model_kwargs["system_prompt"] = request.system
+                            tenant_rag.llm_model_kwargs["system_prompt"] = (
+                                request.system
+                            )
                         response = await tenant_rag.llm_model_func(
                             cleaned_query,
                             stream=True,
@@ -558,36 +565,98 @@ class OllamaAPI:
                         )
 
                     async def stream_generator():
-                        try:
-                            first_chunk_time = None
+                        first_chunk_time = None
+                        last_chunk_time = time.time_ns()
+                        total_response = ""
+
+                        # Ensure response is an async generator
+                        if isinstance(response, str):
+                            # If it's a string, send in two parts
+                            first_chunk_time = start_time
                             last_chunk_time = time.time_ns()
-                            total_response = ""
+                            total_response = response
 
-                            # Ensure response is an async generator
-                            if isinstance(response, str):
-                                # If it's a string, send in two parts
-                                first_chunk_time = start_time
-                                last_chunk_time = time.time_ns()
-                                total_response = response
+                            data = {
+                                "model": self.ollama_server_infos.LIGHTRAG_MODEL,
+                                "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": response,
+                                    "images": None,
+                                },
+                                "done": False,
+                            }
+                            yield f"{json.dumps(data, ensure_ascii=False)}\n"
 
-                                data = {
+                            completion_tokens = estimate_tokens(total_response)
+                            total_time = last_chunk_time - start_time
+                            prompt_eval_time = first_chunk_time - start_time
+                            eval_time = last_chunk_time - first_chunk_time
+
+                            data = {
+                                "model": self.ollama_server_infos.LIGHTRAG_MODEL,
+                                "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "",
+                                    "images": None,
+                                },
+                                "done_reason": "stop",
+                                "done": True,
+                                "total_duration": total_time,
+                                "load_duration": 0,
+                                "prompt_eval_count": prompt_tokens,
+                                "prompt_eval_duration": prompt_eval_time,
+                                "eval_count": completion_tokens,
+                                "eval_duration": eval_time,
+                            }
+                            yield f"{json.dumps(data, ensure_ascii=False)}\n"
+                        else:
+                            try:
+                                async for chunk in response:
+                                    if chunk:
+                                        if first_chunk_time is None:
+                                            first_chunk_time = time.time_ns()
+
+                                        last_chunk_time = time.time_ns()
+
+                                        total_response += chunk
+                                        data = {
+                                            "model": self.ollama_server_infos.LIGHTRAG_MODEL,
+                                            "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
+                                            "message": {
+                                                "role": "assistant",
+                                                "content": chunk,
+                                                "images": None,
+                                            },
+                                            "done": False,
+                                        }
+                                        yield f"{json.dumps(data, ensure_ascii=False)}\n"
+                            except (asyncio.CancelledError, Exception) as e:
+                                error_msg = str(e)
+                                if isinstance(e, asyncio.CancelledError):
+                                    error_msg = "Stream was cancelled by server"
+                                else:
+                                    error_msg = f"Provider error: {error_msg}"
+
+                                logger.error(f"Stream error: {error_msg}")
+
+                                # Send error message to client
+                                error_data = {
                                     "model": self.ollama_server_infos.LIGHTRAG_MODEL,
                                     "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
                                     "message": {
                                         "role": "assistant",
-                                        "content": response,
+                                        "content": f"\n\nError: {error_msg}",
                                         "images": None,
                                     },
+                                    "error": f"\n\nError: {error_msg}",
                                     "done": False,
                                 }
-                                yield f"{json.dumps(data, ensure_ascii=False)}\n"
+                                yield f"{json.dumps(error_data, ensure_ascii=False)}\n"
 
-                                completion_tokens = estimate_tokens(total_response)
-                                total_time = last_chunk_time - start_time
-                                prompt_eval_time = first_chunk_time - start_time
-                                eval_time = last_chunk_time - first_chunk_time
-
-                                data = {
+                                # Send final message to close the stream
+                                final_data = {
                                     "model": self.ollama_server_infos.LIGHTRAG_MODEL,
                                     "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
                                     "message": {
@@ -595,103 +664,36 @@ class OllamaAPI:
                                         "content": "",
                                         "images": None,
                                     },
-                                    "done_reason": "stop",
                                     "done": True,
-                                    "total_duration": total_time,
-                                    "load_duration": 0,
-                                    "prompt_eval_count": prompt_tokens,
-                                    "prompt_eval_duration": prompt_eval_time,
-                                    "eval_count": completion_tokens,
-                                    "eval_duration": eval_time,
                                 }
-                                yield f"{json.dumps(data, ensure_ascii=False)}\n"
-                            else:
-                                try:
-                                    async for chunk in response:
-                                        if chunk:
-                                            if first_chunk_time is None:
-                                                first_chunk_time = time.time_ns()
+                                yield f"{json.dumps(final_data, ensure_ascii=False)}\n"
+                                return
 
-                                            last_chunk_time = time.time_ns()
+                            if first_chunk_time is None:
+                                first_chunk_time = start_time
+                            completion_tokens = estimate_tokens(total_response)
+                            total_time = last_chunk_time - start_time
+                            prompt_eval_time = first_chunk_time - start_time
+                            eval_time = last_chunk_time - first_chunk_time
 
-                                            total_response += chunk
-                                            data = {
-                                                "model": self.ollama_server_infos.LIGHTRAG_MODEL,
-                                                "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
-                                                "message": {
-                                                    "role": "assistant",
-                                                    "content": chunk,
-                                                    "images": None,
-                                                },
-                                                "done": False,
-                                            }
-                                            yield f"{json.dumps(data, ensure_ascii=False)}\n"
-                                except (asyncio.CancelledError, Exception) as e:
-                                    error_msg = str(e)
-                                    if isinstance(e, asyncio.CancelledError):
-                                        error_msg = "Stream was cancelled by server"
-                                    else:
-                                        error_msg = f"Provider error: {error_msg}"
-
-                                    logger.error(f"Stream error: {error_msg}")
-
-                                    # Send error message to client
-                                    error_data = {
-                                        "model": self.ollama_server_infos.LIGHTRAG_MODEL,
-                                        "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
-                                        "message": {
-                                            "role": "assistant",
-                                            "content": f"\n\nError: {error_msg}",
-                                            "images": None,
-                                        },
-                                        "error": f"\n\nError: {error_msg}",
-                                        "done": False,
-                                    }
-                                    yield f"{json.dumps(error_data, ensure_ascii=False)}\n"
-
-                                    # Send final message to close the stream
-                                    final_data = {
-                                        "model": self.ollama_server_infos.LIGHTRAG_MODEL,
-                                        "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
-                                        "message": {
-                                            "role": "assistant",
-                                            "content": "",
-                                            "images": None,
-                                        },
-                                        "done": True,
-                                    }
-                                    yield f"{json.dumps(final_data, ensure_ascii=False)}\n"
-                                    return
-
-                                if first_chunk_time is None:
-                                    first_chunk_time = start_time
-                                completion_tokens = estimate_tokens(total_response)
-                                total_time = last_chunk_time - start_time
-                                prompt_eval_time = first_chunk_time - start_time
-                                eval_time = last_chunk_time - first_chunk_time
-
-                                data = {
-                                    "model": self.ollama_server_infos.LIGHTRAG_MODEL,
-                                    "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
-                                    "message": {
-                                        "role": "assistant",
-                                        "content": "",
-                                        "images": None,
-                                    },
-                                    "done_reason": "stop",
-                                    "done": True,
-                                    "total_duration": total_time,
-                                    "load_duration": 0,
-                                    "prompt_eval_count": prompt_tokens,
-                                    "prompt_eval_duration": prompt_eval_time,
-                                    "eval_count": completion_tokens,
-                                    "eval_duration": eval_time,
-                                }
-                                yield f"{json.dumps(data, ensure_ascii=False)}\n"
-
-                        except Exception as e:
-                            trace_exception(e)
-                            raise
+                            data = {
+                                "model": self.ollama_server_infos.LIGHTRAG_MODEL,
+                                "created_at": self.ollama_server_infos.LIGHTRAG_CREATED_AT,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "",
+                                    "images": None,
+                                },
+                                "done_reason": "stop",
+                                "done": True,
+                                "total_duration": total_time,
+                                "load_duration": 0,
+                                "prompt_eval_count": prompt_tokens,
+                                "prompt_eval_duration": prompt_eval_time,
+                                "eval_count": completion_tokens,
+                                "eval_duration": eval_time,
+                            }
+                            yield f"{json.dumps(data, ensure_ascii=False)}\n"
 
                     return StreamingResponse(
                         stream_generator(),
@@ -712,7 +714,9 @@ class OllamaAPI:
                     )
                     if match_result or mode == SearchMode.bypass:
                         if request.system:
-                            tenant_rag.llm_model_kwargs["system_prompt"] = request.system
+                            tenant_rag.llm_model_kwargs["system_prompt"] = (
+                                request.system
+                            )
 
                         response_text = await tenant_rag.llm_model_func(
                             cleaned_query,
@@ -753,5 +757,5 @@ class OllamaAPI:
                         "eval_duration": eval_time,
                     }
             except Exception as e:
-                trace_exception(e)
+                logger.error(f"Ollama chat error: {str(e)}", exc_info=True)
                 raise HTTPException(status_code=500, detail=str(e))

@@ -69,20 +69,24 @@ docker run -p 9621:9621 -e OPENAI_API_KEY=sk-xxx ghcr.io/hkuds/lightrag:latest
 ```python
 import asyncio
 from lightrag import LightRAG, QueryParam
-
-# Initialize LightRAG
-rag = LightRAG(
-    working_dir="./rag_storage",
-    llm_model_name="gpt-4o-mini",
-    embedding_model_name="text-embedding-ada-002"
-)
+from lightrag.llm.openai import gpt_4o_mini_complete, openai_embed
 
 async def main():
+    # Initialize LightRAG with OpenAI
+    rag = LightRAG(
+        working_dir="./rag_storage",
+        llm_model_func=gpt_4o_mini_complete,
+        embedding_func=openai_embed
+    )
+    
+    # Initialize storage backends
+    await rag.initialize_storages()
+
     # Insert documents
     await rag.ainsert("Marie Curie was a physicist who discovered radium. "
                       "She was born in Poland and later moved to France. "
                       "She won the Nobel Prize in Physics in 1903.")
-    
+
     # Query with different modes
     result = await rag.aquery(
         "What did Marie Curie discover?",
@@ -96,20 +100,30 @@ asyncio.run(main())
 ### 2. Insert Documents from Files
 
 ```python
+import asyncio
 from lightrag import LightRAG
+from lightrag.llm.openai import gpt_4o_mini_complete, openai_embed
 
-rag = LightRAG(working_dir="./rag_storage")
+async def insert_files():
+    rag = LightRAG(
+        working_dir="./rag_storage",
+        llm_model_func=gpt_4o_mini_complete,
+        embedding_func=openai_embed
+    )
+    await rag.initialize_storages()
 
-# Insert from file
-with open("document.txt", "r") as f:
-    text = f.read()
-await rag.ainsert(text)
+    # Insert from file
+    with open("document.txt", "r") as f:
+        text = f.read()
+    await rag.ainsert(text)
 
-# Insert from multiple files
-documents = ["doc1.txt", "doc2.txt", "doc3.txt"]
-for doc in documents:
-    with open(doc, "r") as f:
-        await rag.ainsert(f.read())
+    # Insert from multiple files
+    documents = ["doc1.txt", "doc2.txt", "doc3.txt"]
+    for doc in documents:
+        with open(doc, "r") as f:
+            await rag.ainsert(f.read())
+
+asyncio.run(insert_files())
 ```
 
 ### 3. Query Modes Explained
@@ -210,27 +224,36 @@ HOST=0.0.0.0                       # Bind address
 ### Using Different LLM Providers
 
 ```python
+from lightrag import LightRAG
+
 # OpenAI (default)
+from lightrag.llm.openai import gpt_4o_mini_complete, openai_embed
+
 rag = LightRAG(
-    llm_model_name="gpt-4o-mini",
-    llm_model_func=openai_complete_if_cache
+    working_dir="./rag_storage",
+    llm_model_func=gpt_4o_mini_complete,
+    embedding_func=openai_embed
 )
 
 # Ollama (local)
-from lightrag.llm.ollama import ollama_model_complete
+from lightrag.llm.ollama import ollama_model_complete, ollama_embed
 
 rag = LightRAG(
-    llm_model_name="llama3",
+    working_dir="./rag_storage",
     llm_model_func=ollama_model_complete,
-    llm_model_kwargs={"host": "http://localhost:11434"}
+    llm_model_name="llama3",
+    llm_model_kwargs={"host": "http://localhost:11434"},
+    embedding_func=ollama_embed
 )
 
 # Anthropic Claude
 from lightrag.llm.anthropic import anthropic_complete
 
 rag = LightRAG(
+    working_dir="./rag_storage",
+    llm_model_func=anthropic_complete,
     llm_model_name="claude-sonnet-4-20250514",
-    llm_model_func=anthropic_complete
+    embedding_func=openai_embed  # Use OpenAI for embeddings
 )
 ```
 
@@ -265,16 +288,22 @@ rag = LightRAG(
 import asyncio
 from pathlib import Path
 from lightrag import LightRAG
+from lightrag.llm.openai import gpt_4o_mini_complete, openai_embed
 
 async def process_documents(folder_path: str):
-    rag = LightRAG(working_dir="./rag_storage")
-    
+    rag = LightRAG(
+        working_dir="./rag_storage",
+        llm_model_func=gpt_4o_mini_complete,
+        embedding_func=openai_embed
+    )
+    await rag.initialize_storages()
+
     # Process all text files
     for file_path in Path(folder_path).glob("*.txt"):
         print(f"Processing: {file_path}")
         with open(file_path, "r") as f:
             await rag.ainsert(f.read())
-    
+
     print("All documents indexed!")
 
 asyncio.run(process_documents("./documents"))
@@ -283,16 +312,23 @@ asyncio.run(process_documents("./documents"))
 ### Pattern 2: Conversational RAG
 
 ```python
+import asyncio
 from lightrag import LightRAG, QueryParam
+from lightrag.llm.openai import gpt_4o_mini_complete, openai_embed
 
 async def chat():
-    rag = LightRAG(working_dir="./rag_storage")
-    
+    rag = LightRAG(
+        working_dir="./rag_storage",
+        llm_model_func=gpt_4o_mini_complete,
+        embedding_func=openai_embed
+    )
+    await rag.initialize_storages()
+
     while True:
         question = input("You: ")
         if question.lower() == "quit":
             break
-        
+
         response = await rag.aquery(
             question,
             param=QueryParam(mode="hybrid")
@@ -305,9 +341,18 @@ asyncio.run(chat())
 ### Pattern 3: Batch Queries
 
 ```python
+import asyncio
+from lightrag import LightRAG, QueryParam
+from lightrag.llm.openai import gpt_4o_mini_complete, openai_embed
+
 async def batch_query(questions: list):
-    rag = LightRAG(working_dir="./rag_storage")
-    
+    rag = LightRAG(
+        working_dir="./rag_storage",
+        llm_model_func=gpt_4o_mini_complete,
+        embedding_func=openai_embed
+    )
+    await rag.initialize_storages()
+
     results = []
     for question in questions:
         result = await rag.aquery(
@@ -315,7 +360,7 @@ async def batch_query(questions: list):
             param=QueryParam(mode="hybrid")
         )
         results.append({"question": question, "answer": result})
-    
+
     return results
 
 questions = [
@@ -332,23 +377,29 @@ answers = asyncio.run(batch_query(questions))
 ## Verify Installation
 
 ```python
-# Test script
+# Test script - requires OPENAI_API_KEY environment variable
 import asyncio
+import shutil
 from lightrag import LightRAG, QueryParam
+from lightrag.llm.openai import gpt_4o_mini_complete, openai_embed
 
 async def test():
     # Initialize
-    rag = LightRAG(working_dir="./test_rag")
-    
+    rag = LightRAG(
+        working_dir="./test_rag",
+        llm_model_func=gpt_4o_mini_complete,
+        embedding_func=openai_embed
+    )
+    await rag.initialize_storages()
+
     # Insert test document
     await rag.ainsert("Python is a programming language created by Guido van Rossum.")
-    
+
     # Query
     result = await rag.aquery("Who created Python?", param=QueryParam(mode="hybrid"))
     print(f"Answer: {result}")
-    
+
     # Cleanup
-    import shutil
     shutil.rmtree("./test_rag")
 
 asyncio.run(test())

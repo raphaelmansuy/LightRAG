@@ -23,6 +23,8 @@ import PaginationControls from '@/components/ui/PaginationControls'
 import {
   scanNewDocuments,
   getDocumentsPaginated,
+  getPipelineStatus,
+  resetDocumentStatus,
   DocsStatusesResponse,
   DocStatus,
   DocStatusResponse,
@@ -38,6 +40,21 @@ import PipelineStatusDialog from '@/components/documents/PipelineStatusDialog'
 
 type StatusFilter = DocStatus | 'all';
 
+// Utility functions defined outside component for better performance and to avoid dependency issues
+const getCountValue = (counts: Record<string, number>, ...keys: string[]): number => {
+  for (const key of keys) {
+    const value = counts[key]
+    if (typeof value === 'number') {
+      return value
+    }
+  }
+  return 0
+}
+
+const hasActiveDocumentsStatus = (counts: Record<string, number>): boolean =>
+  getCountValue(counts, 'PROCESSING', 'processing') > 0 ||
+  getCountValue(counts, 'PENDING', 'pending') > 0 ||
+  getCountValue(counts, 'PREPROCESSED', 'preprocessed') > 0
 
 const getDisplayFileName = (doc: DocStatusResponse, maxLength: number = 20): string => {
   // Check if file_path exists and is a non-empty string
@@ -77,7 +94,13 @@ const formatMetadata = (metadata: Record<string, any>): string => {
     }
   }
 
-  return JSON.stringify(formattedMetadata, null, 2);
+  // Format JSON and remove outer braces and indentation
+  const jsonStr = JSON.stringify(formattedMetadata, null, 2);
+  const lines = jsonStr.split('\n');
+  // Remove first line ({) and last line (}), and remove leading indentation (2 spaces)
+  return lines.slice(1, -1)
+    .map(line => line.replace(/^ {2}/, ''))
+    .join('\n');
 };
 
 const pulseStyle = `
@@ -202,6 +225,7 @@ export default function DocumentManager() {
   const { t, i18n } = useTranslation()
   const health = useBackendState.use.health()
   const pipelineBusy = useBackendState.use.pipelineBusy()
+  const setPipelineBusy = useBackendState.use.setPipelineBusy()
 
   // Legacy state for backward compatibility
   const [docs, setDocs] = useState<DocsStatusesResponse | null>(null)
@@ -235,10 +259,10 @@ export default function DocumentManager() {
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false)
 
   // Sort state - initialize from route state if available
-  const [sortField, setSortField] = useState<SortField>(() => 
+  const [sortField, setSortField] = useState<SortField>(() =>
     (routeState.sort as SortField) || 'updated_at'
   )
-  const [sortDirection, setSortDirection] = useState<SortDirection>(() => 
+  const [sortDirection, setSortDirection] = useState<SortDirection>(() =>
     routeState.sortDirection || 'desc'
   )
 
@@ -254,15 +278,16 @@ export default function DocumentManager() {
   const [pageByStatus, setPageByStatus] = useState<Record<StatusFilter, number>>({
     all: routeState.page,
     processed: 1,
+    preprocessed: 1,
     processing: 1,
     pending: 1,
     failed: 1,
   });
-  
+
   // Sync state changes to URL (tenant-agnostic)
   useEffect(() => {
     if (!selectedTenant) return
-    
+
     routeState.setState({
       page: pagination.page,
       pageSize: pagination.page_size,
@@ -334,6 +359,7 @@ export default function DocumentManager() {
     setPageByStatus({
       all: 1,
       processed: 1,
+      preprocessed: 1,
       processing: 1,
       pending: 1,
       failed: 1,
@@ -478,9 +504,19 @@ export default function DocumentManager() {
     return counts;
   }, [docs]);
 
+  const processedCount = getCountValue(statusCounts, 'PROCESSED', 'processed') || documentCounts.processed || 0;
+  const preprocessedCount =
+    getCountValue(statusCounts, 'PREPROCESSED', 'preprocessed') ||
+    documentCounts.preprocessed ||
+    0;
+  const processingCount = getCountValue(statusCounts, 'PROCESSING', 'processing') || documentCounts.processing || 0;
+  const pendingCount = getCountValue(statusCounts, 'PENDING', 'pending') || documentCounts.pending || 0;
+  const failedCount = getCountValue(statusCounts, 'FAILED', 'failed') || documentCounts.failed || 0;
+
   // Store previous status counts
   const prevStatusCounts = useRef({
     processed: 0,
+    preprocessed: 0,
     processing: 0,
     pending: 0,
     failed: 0
@@ -571,6 +607,7 @@ export default function DocumentManager() {
     const legacyDocs: DocsStatusesResponse = {
       statuses: {
         processed: response.documents.filter((doc: DocStatusResponse) => doc.status === 'processed'),
+        preprocessed: response.documents.filter((doc: DocStatusResponse) => doc.status === 'preprocessed'),
         processing: response.documents.filter((doc: DocStatusResponse) => doc.status === 'processing'),
         pending: response.documents.filter((doc: DocStatusResponse) => doc.status === 'pending'),
         failed: response.documents.filter((doc: DocStatusResponse) => doc.status === 'failed')
@@ -598,7 +635,7 @@ export default function DocumentManager() {
   // Enhanced error classification
   const classifyError = useCallback((error: any) => {
     // Handle axios Cancel errors (from context guards) - don't show toast
-    if (error.__CANCEL__ || error.name === 'CanceledError' || 
+    if (error.__CANCEL__ || error.name === 'CanceledError' ||
         error.message?.includes('Please select a tenant')) {
       return { type: 'context-missing', shouldRetry: false, shouldShowToast: false };
     }
@@ -686,20 +723,20 @@ export default function DocumentManager() {
     try {
       const storedTenant = localStorage.getItem('SELECTED_TENANT');
       const storedKB = localStorage.getItem('SELECTED_KB');
-      
+
       if (!storedTenant || !storedKB) {
         console.log('[DocumentManager] localStorage tenant context not ready');
         return false;
       }
-      
+
       const parsedTenant = JSON.parse(storedTenant);
       const parsedKB = JSON.parse(storedKB);
-      
+
       if (!parsedTenant?.tenant_id || !parsedKB?.kb_id) {
         console.log('[DocumentManager] localStorage tenant/KB missing required fields');
         return false;
       }
-      
+
       return true;
     } catch (e) {
       console.error('[DocumentManager] Error checking localStorage tenant context', e);
@@ -714,7 +751,7 @@ export default function DocumentManager() {
   ) => {
     try {
       if (!isMountedRef.current) return;
-      
+
       // Guard: Check tenant context before making API calls
       if (!isTenantContextReady()) {
         console.log('[DocumentManager] Skipping refresh - tenant context not ready');
@@ -776,6 +813,18 @@ export default function DocumentManager() {
       }
       updateComponentState(response);
 
+      // Fetch tenant-specific pipeline status and update global state
+      // This ensures pipelineBusy reflects the current tenant's pipeline, not global state
+      try {
+        const pipelineStatus = await getPipelineStatus();
+        if (isMountedRef.current) {
+          setPipelineBusy(pipelineStatus.busy);
+        }
+      } catch (pipelineErr) {
+        // Silently ignore pipeline status fetch errors - not critical
+        console.warn('[DocumentManager] Failed to fetch pipeline status:', pipelineErr);
+      }
+
     } catch (err) {
       if (isMountedRef.current) {
         const errorClassification = classifyError(err);
@@ -787,7 +836,7 @@ export default function DocumentManager() {
         if (errorClassification.shouldRetry) {
           recordFailure(err as Error);
         }
-        
+
         // Mark as loaded even on error to stop infinite loading spinner
         // This allows user to see the "No Documents" state and retry
         if (errorClassification.type !== 'context-missing') {
@@ -799,7 +848,7 @@ export default function DocumentManager() {
         setIsRefreshing(false);
       }
     }
-  }, [statusFilter, pagination.page, pagination.page_size, sortField, sortDirection, t, updateComponentState, withTimeout, classifyError, recordFailure]);
+  }, [statusFilter, pagination.page, pagination.page_size, sortField, sortDirection, t, updateComponentState, withTimeout, classifyError, recordFailure, setPipelineBusy, isTenantContextReady]);
 
   // New paginated data fetching function
   const fetchPaginatedDocuments = useCallback(async (
@@ -900,7 +949,7 @@ export default function DocumentManager() {
       setTimeout(() => {
         if (isMountedRef.current && currentTab === 'documents' && health) {
           // Restore intelligent polling interval based on document status
-          const hasActiveDocuments = (statusCounts.processing || 0) > 0 || (statusCounts.pending || 0) > 0;
+          const hasActiveDocuments = hasActiveDocumentsStatus(statusCounts);
           const normalInterval = hasActiveDocuments ? 5000 : 30000;
           startPollingInterval(normalInterval);
         }
@@ -924,6 +973,7 @@ export default function DocumentManager() {
     setPageByStatus({
       all: 1,
       processed: 1,
+      preprocessed: 1,
       processing: 1,
       pending: 1,
       failed: 1,
@@ -939,7 +989,7 @@ export default function DocumentManager() {
       console.log('[DocumentManager] Skipping manual refresh - tenant context not ready');
       return;
     }
-    
+
     try {
       setIsRefreshing(true);
 
@@ -970,6 +1020,7 @@ export default function DocumentManager() {
         const legacyDocs: DocsStatusesResponse = {
           statuses: {
             processed: response.documents.filter(doc => doc.status === 'processed'),
+            preprocessed: response.documents.filter(doc => doc.status === 'preprocessed'),
             processing: response.documents.filter(doc => doc.status === 'processing'),
             pending: response.documents.filter(doc => doc.status === 'pending'),
             failed: response.documents.filter(doc => doc.status === 'failed')
@@ -1007,14 +1058,21 @@ export default function DocumentManager() {
         handleIntelligentRefresh();
 
         // Reset polling timer after intelligent refresh
-        const hasActiveDocuments = (statusCounts.processing || 0) > 0 || (statusCounts.pending || 0) > 0;
+        const hasActiveDocuments = hasActiveDocumentsStatus(statusCounts);
         const pollingInterval = hasActiveDocuments ? 5000 : 30000;
         startPollingInterval(pollingInterval);
       }
     }
     // Update the previous state
     prevPipelineBusyRef.current = pipelineBusy;
-  }, [pipelineBusy, currentTab, health, handleIntelligentRefresh, statusCounts.processing, statusCounts.pending, startPollingInterval]);
+  }, [
+    pipelineBusy,
+    currentTab,
+    health,
+    handleIntelligentRefresh,
+    statusCounts,
+    startPollingInterval
+  ]);
 
   // Set up intelligent polling with dynamic interval based on document status
   useEffect(() => {
@@ -1024,7 +1082,7 @@ export default function DocumentManager() {
     }
 
     // Determine polling interval based on document status
-    const hasActiveDocuments = (statusCounts.processing || 0) > 0 || (statusCounts.pending || 0) > 0;
+    const hasActiveDocuments = hasActiveDocumentsStatus(statusCounts);
     const pollingInterval = hasActiveDocuments ? 5000 : 30000; // 5s if active, 30s if idle
 
     startPollingInterval(pollingInterval);
@@ -1041,6 +1099,7 @@ export default function DocumentManager() {
     // Get new status counts
     const newStatusCounts = {
       processed: docs?.statuses?.processed?.length || 0,
+      preprocessed: docs?.statuses?.preprocessed?.length || 0,
       processing: docs?.statuses?.processing?.length || 0,
       pending: docs?.statuses?.pending?.length || 0,
       failed: docs?.statuses?.failed?.length || 0
@@ -1083,6 +1142,42 @@ export default function DocumentManager() {
     setStatusFilter(newStatusFilter);
     setPagination(prev => ({ ...prev, page: newPage }));
   }, [statusFilter, pagination.page, pageByStatus]);
+
+  // State for reset operation
+  const [isResetting, setIsResetting] = useState(false)
+
+  // Handle reset document status to pending for retry
+  const handleResetToPending = useCallback(async () => {
+    if (selectedDocIds.length === 0) return
+
+    setIsResetting(true)
+    try {
+      const response = await resetDocumentStatus({
+        doc_ids: selectedDocIds,
+        target_status: 'pending'
+      })
+
+      if (response.status === 'success') {
+        toast.success(t('documentPanel.documentManager.resetSuccess', { count: response.reset_count }))
+        setSelectedDocIds([])
+        // Refresh documents
+        startPollingInterval(500)
+      } else if (response.status === 'partial') {
+        toast.warning(t('documentPanel.documentManager.resetPartial', {
+          count: response.reset_count,
+          failed: response.failed_ids.length
+        }))
+        setSelectedDocIds([])
+        startPollingInterval(500)
+      } else {
+        toast.error(t('documentPanel.documentManager.resetFailed'))
+      }
+    } catch (err) {
+      toast.error(t('documentPanel.documentManager.errors.resetFailed', { error: errorMessage(err) }))
+    } finally {
+      setIsResetting(false)
+    }
+  }, [selectedDocIds, t, startPollingInterval])
 
   // Handle documents deleted callback
   const handleDocumentsDeleted = useCallback(async () => {
@@ -1174,31 +1269,31 @@ export default function DocumentManager() {
       console.log('[DocumentManager] Skipping fetch - not on documents tab');
       return;
     }
-    
+
     // Guard: Must have tenant selected
     if (!selectedTenant?.tenant_id) {
       console.log('[DocumentManager] Skipping fetch - no tenant');
       return;
     }
-    
+
     // Verify localStorage is in sync before making API calls
     // We need to check synchronously and retry a few times if needed
     let attempts = 0;
     const maxAttempts = 10;
     const checkIntervalMs = 50;
-    
+
     const checkAndFetch = () => {
       attempts++;
-      
+
       // Check localStorage directly - this is the source of truth
       try {
         const storedTenant = localStorage.getItem('SELECTED_TENANT');
         const storedKB = localStorage.getItem('SELECTED_KB');
-        
+
         if (storedTenant && storedKB) {
           const parsedTenant = JSON.parse(storedTenant);
           const parsedKB = JSON.parse(storedKB);
-          
+
           // Verify tenant matches what we expect
           if (parsedTenant?.tenant_id === selectedTenant.tenant_id && parsedKB?.kb_id) {
             // Context is ready, proceed with fetch
@@ -1210,7 +1305,7 @@ export default function DocumentManager() {
       } catch (e) {
         console.error('[DocumentManager] Error checking localStorage', e);
       }
-      
+
       // If not ready yet and we haven't exceeded max attempts, try again
       if (attempts < maxAttempts) {
         console.log(`[DocumentManager] Context not ready yet, retry ${attempts}/${maxAttempts}`);
@@ -1221,10 +1316,10 @@ export default function DocumentManager() {
         setHasLoadedOnce(true);
       }
     };
-    
+
     // Start checking after a small initial delay
     const timeoutId = setTimeout(checkAndFetch, 30);
-    
+
     return () => clearTimeout(timeoutId);
   }, [
     currentTab,
@@ -1242,7 +1337,7 @@ export default function DocumentManager() {
   // Also check localStorage as fallback since Zustand state may lag behind
   const hasTenantContext = useMemo(() => {
     if (selectedTenant && selectedKB) return true;
-    
+
     // Check localStorage as fallback
     try {
       const storedTenant = localStorage.getItem('SELECTED_TENANT');
@@ -1252,7 +1347,7 @@ export default function DocumentManager() {
       return false;
     }
   }, [selectedTenant, selectedKB]);
-  
+
   if (!hasTenantContext) {
     return (
       <Card className="!rounded-none !overflow-hidden flex flex-col h-full min-h-0">
@@ -1319,10 +1414,27 @@ export default function DocumentManager() {
 
           <div className="flex gap-2">
             {isSelectionMode && (
-              <DeleteDocumentsDialog
-                selectedDocIds={selectedDocIds}
-                onDocumentsDeleted={handleDocumentsDeleted}
-              />
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleResetToPending}
+                  disabled={isResetting}
+                  side="bottom"
+                  tooltip={t('documentPanel.documentManager.resetToPending')}
+                >
+                  {isResetting ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <RotateCcwIcon className="h-4 w-4" />
+                  )}
+                  {t('documentPanel.documentManager.retry')}
+                </Button>
+                <DeleteDocumentsDialog
+                  selectedDocIds={selectedDocIds}
+                  onDocumentsDeleted={handleDocumentsDeleted}
+                />
+              </>
             )}
             {isSelectionMode && hasCurrentPageSelection ? (
               (() => {
@@ -1375,11 +1487,23 @@ export default function DocumentManager() {
                     onClick={() => handleStatusFilterChange('processed')}
                     disabled={isRefreshing}
                     className={cn(
-                      (statusCounts.PROCESSED || statusCounts.processed || documentCounts.processed) > 0 ? 'text-green-600' : 'text-gray-500',
+                      processedCount > 0 ? 'text-green-600' : 'text-gray-500',
                       statusFilter === 'processed' && 'bg-green-100 dark:bg-green-900/30 font-medium border border-green-400 dark:border-green-600 shadow-sm'
                     )}
                   >
-                    {t('documentPanel.documentManager.status.completed')} ({statusCounts.PROCESSED || statusCounts.processed || 0})
+                    {t('documentPanel.documentManager.status.completed')} ({processedCount})
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={statusFilter === 'preprocessed' ? 'secondary' : 'outline'}
+                    onClick={() => handleStatusFilterChange('preprocessed')}
+                    disabled={isRefreshing}
+                    className={cn(
+                      preprocessedCount > 0 ? 'text-purple-600' : 'text-gray-500',
+                      statusFilter === 'preprocessed' && 'bg-purple-100 dark:bg-purple-900/30 font-medium border border-purple-400 dark:border-purple-600 shadow-sm'
+                    )}
+                  >
+                    {t('documentPanel.documentManager.status.preprocessed')} ({preprocessedCount})
                   </Button>
                   <Button
                     size="sm"
@@ -1387,11 +1511,11 @@ export default function DocumentManager() {
                     onClick={() => handleStatusFilterChange('processing')}
                     disabled={isRefreshing}
                     className={cn(
-                      (statusCounts.PROCESSING || statusCounts.processing || documentCounts.processing) > 0 ? 'text-blue-600' : 'text-gray-500',
+                      processingCount > 0 ? 'text-blue-600' : 'text-gray-500',
                       statusFilter === 'processing' && 'bg-blue-100 dark:bg-blue-900/30 font-medium border border-blue-400 dark:border-blue-600 shadow-sm'
                     )}
                   >
-                    {t('documentPanel.documentManager.status.processing')} ({statusCounts.PROCESSING || statusCounts.processing || 0})
+                    {t('documentPanel.documentManager.status.processing')} ({processingCount})
                   </Button>
                   <Button
                     size="sm"
@@ -1399,11 +1523,11 @@ export default function DocumentManager() {
                     onClick={() => handleStatusFilterChange('pending')}
                     disabled={isRefreshing}
                     className={cn(
-                      (statusCounts.PENDING || statusCounts.pending || documentCounts.pending) > 0 ? 'text-yellow-600' : 'text-gray-500',
+                      pendingCount > 0 ? 'text-yellow-600' : 'text-gray-500',
                       statusFilter === 'pending' && 'bg-yellow-100 dark:bg-yellow-900/30 font-medium border border-yellow-400 dark:border-yellow-600 shadow-sm'
                     )}
                   >
-                    {t('documentPanel.documentManager.status.pending')} ({statusCounts.PENDING || statusCounts.pending || 0})
+                    {t('documentPanel.documentManager.status.pending')} ({pendingCount})
                   </Button>
                   <Button
                     size="sm"
@@ -1411,11 +1535,11 @@ export default function DocumentManager() {
                     onClick={() => handleStatusFilterChange('failed')}
                     disabled={isRefreshing}
                     className={cn(
-                      (statusCounts.FAILED || statusCounts.failed || documentCounts.failed) > 0 ? 'text-red-600' : 'text-gray-500',
+                      failedCount > 0 ? 'text-red-600' : 'text-gray-500',
                       statusFilter === 'failed' && 'bg-red-100 dark:bg-red-900/30 font-medium border border-red-400 dark:border-red-600 shadow-sm'
                     )}
                   >
-                    {t('documentPanel.documentManager.status.failed')} ({statusCounts.FAILED || statusCounts.failed || 0})
+                    {t('documentPanel.documentManager.status.failed')} ({failedCount})
                   </Button>
                 </div>
                 <Button
@@ -1604,6 +1728,9 @@ export default function DocumentManager() {
                               {doc.status === 'processed' && (
                                 <span className="text-green-600">{t('documentPanel.documentManager.status.completed')}</span>
                               )}
+                              {doc.status === 'preprocessed' && (
+                                <span className="text-purple-600">{t('documentPanel.documentManager.status.preprocessed')}</span>
+                              )}
                               {doc.status === 'processing' && (
                                 <span className="text-blue-600">{t('documentPanel.documentManager.status.processing')}</span>
                               )}
@@ -1622,13 +1749,16 @@ export default function DocumentManager() {
                               )}
 
                               {/* Tooltip rendering logic */}
-                              {(doc.error_msg || (doc.metadata && Object.keys(doc.metadata).length > 0)) && (
+                              {(doc.error_msg || (doc.metadata && Object.keys(doc.metadata).length > 0) || doc.track_id) && (
                                 <div className="invisible group-hover:visible tooltip">
-                                  {doc.error_msg && (
-                                    <pre>{doc.error_msg}</pre>
+                                  {doc.track_id && (
+                                    <div className="mt-1">Track ID: {doc.track_id}</div>
                                   )}
                                   {doc.metadata && Object.keys(doc.metadata).length > 0 && (
                                     <pre>{formatMetadata(doc.metadata)}</pre>
+                                  )}
+                                  {doc.error_msg && (
+                                    <pre>{doc.error_msg}</pre>
                                   )}
                                 </div>
                               )}

@@ -17,6 +17,7 @@ import { getPopularLabels, searchLabels } from '@/api/lightrag'
 const GraphLabels = () => {
   const { t } = useTranslation()
   const label = useSettingsStore.use.queryLabel()
+  const dropdownRefreshTrigger = useSettingsStore.use.searchLabelDropdownRefreshTrigger()
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [refreshTrigger, setRefreshTrigger] = useState(0)
   const [selectKey, setSelectKey] = useState(0)
@@ -53,6 +54,18 @@ const GraphLabels = () => {
 
     initializeHistory()
   }, [])
+
+  // Force AsyncSelect to re-render when label changes externally (e.g., from entity rename/merge)
+  useEffect(() => {
+    setSelectKey(prev => prev + 1)
+  }, [label])
+
+  // Force AsyncSelect to re-render when dropdown refresh is triggered (e.g., after entity rename)
+  useEffect(() => {
+    if (dropdownRefreshTrigger > 0) {
+      setSelectKey(prev => prev + 1)
+    }
+  }, [dropdownRefreshTrigger])
 
   const fetchData = useCallback(
     async (query?: string): Promise<string[]> => {
@@ -175,49 +188,62 @@ const GraphLabels = () => {
       >
         <RefreshCw className={`h-4 w-4 ${isRefreshing ? 'animate-spin' : ''}`} />
       </Button>
-      <AsyncSelect<string>
-        key={selectKey} // Force re-render when data changes
-        className="min-w-[300px]"
-        triggerClassName="max-h-8"
-        searchInputClassName="max-h-8"
-        triggerTooltip={t('graphPanel.graphLabels.selectTooltip')}
-        fetcher={fetchData}
-        renderOption={(item) => <div style={{ whiteSpace: 'pre' }}>{item}</div>}
-        getOptionValue={(item) => item}
-        getDisplayValue={(item) => <div style={{ whiteSpace: 'pre' }}>{item}</div>}
-        notFound={<div className="py-6 text-center text-sm">{t('graphPanel.graphLabels.noLabels')}</div>}
-        ariaLabel={t('graphPanel.graphLabels.label')}
-        placeholder={t('graphPanel.graphLabels.placeholder')}
-        searchPlaceholder={t('graphPanel.graphLabels.placeholder')}
-        noResultsMessage={t('graphPanel.graphLabels.noLabels')}
-        value={label !== null ? label : '*'}
-        onChange={(newLabel) => {
-          const currentLabel = useSettingsStore.getState().queryLabel;
+      <div className="w-full min-w-[280px] max-w-[500px]">
+        <AsyncSelect<string>
+          key={selectKey} // Force re-render when data changes
+          className="min-w-[300px]"
+          triggerClassName="max-h-8 w-full overflow-hidden"
+          searchInputClassName="max-h-8"
+          triggerTooltip={t('graphPanel.graphLabels.selectTooltip')}
+          fetcher={fetchData}
+          renderOption={(item) => (
+            <div className="truncate" title={item}>
+              {item}
+            </div>
+          )}
+          getOptionValue={(item) => item}
+          getDisplayValue={(item) => (
+            <div className="min-w-0 flex-1 truncate text-left" title={item}>
+              {item}
+            </div>
+          )}
+          notFound={<div className="py-6 text-center text-sm">{t('graphPanel.graphLabels.noLabels')}</div>}
+          ariaLabel={t('graphPanel.graphLabels.label')}
+          placeholder={t('graphPanel.graphLabels.placeholder')}
+          searchPlaceholder={t('graphPanel.graphLabels.placeholder')}
+          noResultsMessage={t('graphPanel.graphLabels.noLabels')}
+          value={label !== null ? label : '*'}
+          onChange={(newLabel) => {
+            const currentLabel = useSettingsStore.getState().queryLabel;
 
-          // select the last item means query all
-          if (newLabel === '...') {
-            newLabel = '*';
-          }
+            // select the last item means query all
+            if (newLabel === '...') {
+              newLabel = '*';
+            }
 
-          // Handle reselecting the same label
-          if (newLabel === currentLabel && newLabel !== '*') {
-            newLabel = '*';
-          }
+            // Handle reselecting the same label
+            if (newLabel === currentLabel && newLabel !== '*') {
+              newLabel = '*';
+            }
 
-          // Add selected label to search history (except for special cases)
-          if (newLabel && newLabel !== '*' && newLabel !== '...' && newLabel.trim() !== '') {
-            SearchHistoryManager.addToHistory(newLabel);
-          }
+            // Add selected label to search history (except for special cases)
+            if (newLabel && newLabel !== '*' && newLabel !== '...' && newLabel.trim() !== '') {
+              SearchHistoryManager.addToHistory(newLabel);
+            }
 
-          // Reset graphDataFetchAttempted flag to ensure data fetch is triggered
-          useGraphStore.getState().setGraphDataFetchAttempted(false);
+            // Reset graphDataFetchAttempted flag to ensure data fetch is triggered
+            useGraphStore.getState().setGraphDataFetchAttempted(false);
 
-          // Update the label to trigger data loading
-          useSettingsStore.getState().setQueryLabel(newLabel);
-        }}
-        clearable={false}  // Prevent clearing value on reselect
-        debounceTime={500}
-      />
+            // Update the label to trigger data loading
+            useSettingsStore.getState().setQueryLabel(newLabel);
+
+            // Force graph re-render and reset zoom/scale (must be AFTER setQueryLabel)
+            useGraphStore.getState().incrementGraphDataVersion();
+          }}
+          clearable={false}  // Prevent clearing value on reselect
+          debounceTime={500}
+        />
+      </div>
     </div>
   )
 }
