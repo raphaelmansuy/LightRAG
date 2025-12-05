@@ -3,12 +3,21 @@ This module contains all query-related routes for the LightRAG API.
 """
 
 import json
-from typing import Any, Dict, List, Literal, Optional
+import logging
+from typing import Any, Dict, List, Literal, Optional, TYPE_CHECKING
+
 from fastapi import APIRouter, Depends, HTTPException
+from lightrag import LightRAG
 from lightrag.base import QueryParam
 from lightrag.api.utils_api import get_combined_auth_dependency
 from lightrag.utils import logger
 from pydantic import BaseModel, Field, field_validator
+
+from ascii_colors import trace_exception
+
+# Type checking import to avoid circular dependencies
+if TYPE_CHECKING:
+    from lightrag.tenant_rag_manager import TenantRAGManager
 
 router = APIRouter(tags=["query"])
 
@@ -190,8 +199,51 @@ class StreamChunkResponse(BaseModel):
     )
 
 
-def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
+def create_query_routes(
+    rag: LightRAG,
+    api_key: Optional[str] = None,
+    top_k: int = 60,
+    rag_manager: Optional["TenantRAGManager"] = None,
+):
+    """Create query routes with optional multi-tenant support.
+
+    Args:
+        rag: Default/global LightRAG instance
+        api_key: Optional API key for authentication
+        top_k: Default top_k value for queries
+        rag_manager: Optional TenantRAGManager for multi-tenant mode
+    """
+    # Import here to avoid circular dependencies
+    from lightrag.api.dependencies import get_tenant_context_optional
+    from lightrag.models.tenant import TenantContext
+
     combined_auth = get_combined_auth_dependency(api_key)
+
+    async def get_tenant_rag(
+        tenant_context: Optional[TenantContext] = Depends(get_tenant_context_optional),
+    ) -> LightRAG:
+        """Dependency to get tenant-specific RAG instance for query operations.
+
+        In multi-tenant mode (when rag_manager is provided), returns tenant-specific RAG.
+        Otherwise, falls back to the global RAG instance.
+        """
+        if (
+            rag_manager
+            and tenant_context
+            and tenant_context.tenant_id
+            and tenant_context.kb_id
+        ):
+            try:
+                return await rag_manager.get_rag_instance(
+                    tenant_context.tenant_id,
+                    tenant_context.kb_id,
+                    tenant_context.user_id,
+                )
+            except Exception as e:
+                logging.warning(
+                    f"Failed to get tenant RAG instance: {e}, falling back to global"
+                )
+        return rag
 
     @router.post(
         "/query",
@@ -248,24 +300,19 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                             },
                             "with_chunk_content": {
                                 "summary": "Response with chunk content",
-                                "description": "Example response when include_references=True and include_chunk_content=True. Note: content is an array of chunks from the same file.",
+                                "description": "Example response when include_references=True and include_chunk_content=True",
                                 "value": {
                                     "response": "Artificial Intelligence (AI) is a branch of computer science that aims to create intelligent machines capable of performing tasks that typically require human intelligence, such as learning, reasoning, and problem-solving.",
                                     "references": [
                                         {
                                             "reference_id": "1",
                                             "file_path": "/documents/ai_overview.pdf",
-                                            "content": [
-                                                "Artificial Intelligence (AI) represents a transformative field in computer science focused on creating systems that can perform tasks requiring human-like intelligence. These tasks include learning from experience, understanding natural language, recognizing patterns, and making decisions.",
-                                                "AI systems can be categorized into narrow AI, which is designed for specific tasks, and general AI, which aims to match human cognitive abilities across a wide range of domains.",
-                                            ],
+                                            "content": "Artificial Intelligence (AI) represents a transformative field in computer science focused on creating systems that can perform tasks requiring human-like intelligence. These tasks include learning from experience, understanding natural language, recognizing patterns, and making decisions.",
                                         },
                                         {
                                             "reference_id": "2",
                                             "file_path": "/documents/machine_learning.txt",
-                                            "content": [
-                                                "Machine learning is a subset of AI that enables computers to learn and improve from experience without being explicitly programmed. It focuses on the development of algorithms that can access data and use it to learn for themselves."
-                                            ],
+                                            "content": "Machine learning is a subset of AI that enables computers to learn and improve from experience without being explicitly programmed. It focuses on the development of algorithms that can access data and use it to learn for themselves.",
                                         },
                                     ],
                                 },
@@ -322,7 +369,10 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             },
         },
     )
-    async def query_text(request: QueryRequest):
+    async def query_text(
+        request: QueryRequest,
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
+    ):
         """
         Comprehensive RAG query endpoint with non-streaming response. Parameter "stream" is ignored.
 
@@ -409,7 +459,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             param.stream = False
 
             # Unified approach: always use aquery_llm for both cases
-            result = await rag.aquery_llm(request.query, param=param)
+            result = await tenant_rag.aquery_llm(request.query, param=param)
 
             # Extract LLM response and references from unified result
             llm_response = result.get("llm_response", {})
@@ -439,8 +489,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                     ref_copy = ref.copy()
                     ref_id = ref.get("reference_id", "")
                     if ref_id in ref_id_to_content:
-                        # Keep content as a list of chunks (one file may have multiple chunks)
-                        ref_copy["content"] = ref_id_to_content[ref_id]
+                        ref_copy["content"] = "\n\n".join(ref_id_to_content[ref_id])
                     enriched_references.append(ref_copy)
                 references = enriched_references
 
@@ -532,7 +581,10 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             },
         },
     )
-    async def query_text_stream(request: QueryRequest):
+    async def query_text_stream(
+        request: QueryRequest,
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
+    ):
         """
         Advanced RAG query endpoint with flexible streaming response.
 
@@ -667,7 +719,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             from fastapi.responses import StreamingResponse
 
             # Unified approach: always use aquery_llm for all cases
-            result = await rag.aquery_llm(request.query, param=param)
+            result = await tenant_rag.aquery_llm(request.query, param=param)
 
             async def stream_generator():
                 # Extract references and LLM response from unified result
@@ -1035,7 +1087,10 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             },
         },
     )
-    async def query_data(request: QueryRequest):
+    async def query_data(
+        request: QueryRequest,
+        tenant_rag: LightRAG = Depends(get_tenant_rag),
+    ):
         """
         Advanced data retrieval endpoint for structured RAG analysis.
 
@@ -1140,7 +1195,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
         """
         try:
             param = request.to_query_params(False)  # No streaming for data endpoint
-            response = await rag.aquery_data(request.query, param=param)
+            response = await tenant_rag.aquery_data(request.query, param=param)
 
             # aquery_data returns the new format with status, message, data, and metadata
             if isinstance(response, dict):

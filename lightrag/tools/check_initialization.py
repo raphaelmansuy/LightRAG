@@ -147,7 +147,10 @@ async def demo():
     print("\n🔄 Initializing storages...\n")
     await rag.initialize_storages()  # Auto-initializes pipeline_status
 
-    print("\n🔍 Checking initialization status:\n")
+    print("\n" + "=" * 50)
+    print("\n🔄 Initializing...\n")
+    await rag.initialize_storages()  # Auto-initializes pipeline_status
+    print("\n🟢 AFTER initialization:\n")
     await check_lightrag_setup(rag, verbose=True)
 
     # Cleanup

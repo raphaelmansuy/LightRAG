@@ -534,17 +534,18 @@ class TestEndToEndChunking:
         mock_response.request_info = None
         mock_response.history = None
         mock_response.headers = {}
-        # Make mock_response an async context manager (for `async with session.post() as response`)
-        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_response.__aexit__ = AsyncMock(return_value=None)
+
+        # Create async context manager for response
+        mock_response_cm = AsyncMock()
+        mock_response_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response_cm.__aexit__ = AsyncMock(return_value=None)
 
         mock_session = Mock()
-        # session.post() returns an async context manager, so return mock_response which is now one
-        mock_session.post = Mock(return_value=mock_response)
+        mock_session.post = Mock(return_value=mock_response_cm)
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=None)
 
-        with patch("lightrag.rerank.aiohttp.ClientSession", return_value=mock_session):
+        with patch("aiohttp.ClientSession", return_value=mock_session):
             result = await cohere_rerank(
                 query=query,
                 documents=documents,

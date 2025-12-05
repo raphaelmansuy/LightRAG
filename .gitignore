@@ -67,10 +67,17 @@ download_models_hf.py
 # Frontend build output (built during PyPI release)
 /lightrag/api/webui/
 
-# temporary test files in project root
+# unit-test files (root level only, not tests/ directory)
 /test_*
 
 # Cline files
 memory-bank
-.claude/CLAUDE.md
-.claude/
+
+# Playwright MCP screenshots (debugging artifacts)
+.playwright-mcp/
+
+# Development logs (task logs, session logs)
+logs/
+
+# Test data fixtures (generated during testing)
+test_rag_env/

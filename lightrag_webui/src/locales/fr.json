@@ -147,13 +147,26 @@
       "errors": {
         "loadFailed": "Échec du chargement des documents\n{{error}}",
         "scanFailed": "Échec de la numérisation des documents\n{{error}}",
-        "scanProgressFailed": "Échec de l'obtention de la progression de la numérisation\n{{error}}"
+        "scanProgressFailed": "Échec de l'obtention de la progression de la numérisation\n{{error}}",
+        "resetFailed": "Échec de la réinitialisation du statut\n{{error}}"
       },
+      "retry": "Réessayer",
+      "resetToPending": "Réinitialiser les documents sélectionnés en attente pour réessayer",
+      "resetSuccess": "{{count}} document(s) réinitialisé(s) avec succès",
+      "resetPartial": "{{count}} document(s) réinitialisé(s), mais {{failed}} ont échoué",
+      "resetFailed": "Échec de la réinitialisation des documents",
       "fileNameLabel": "Nom du fichier",
       "showButton": "Afficher",
       "hideButton": "Masquer",
       "showFileNameTooltip": "Afficher le nom du fichier",
-      "hideFileNameTooltip": "Masquer le nom du fichier"
+      "hideFileNameTooltip": "Masquer le nom du fichier",
+      "loading": "Chargement des documents...",
+      "loadingHint": "Cela peut prendre un moment",
+      "emptyWithPipelineTitle": "Traitement en cours",
+      "emptyWithPipelineDescription": "Les documents sont en cours de traitement dans le pipeline. Vous pouvez scanner de nouveaux documents ou voir l'état du pipeline.",
+      "scanForDocuments": "Scanner les documents",
+      "viewPipeline": "Voir le pipeline",
+      "emptyHint": "Téléchargez des documents à l'aide du bouton ci-dessus ou scannez les documents dans le dossier d'entrée."
     },
     "pipelineStatus": {
       "title": "État du Pipeline",

@@ -6,10 +6,13 @@ import StatusIndicator from '@/components/status/StatusIndicator'
 import { SiteInfo, webuiPrefix } from '@/lib/constants'
 import { useBackendState, useAuthStore } from '@/stores/state'
 import { useSettingsStore } from '@/stores/settings'
+import { useTenantState, Tenant } from '@/stores/tenant'
 import { getAuthStatus } from '@/api/lightrag'
 import SiteHeader from '@/features/SiteHeader'
+import TenantSelectionPage from '@/features/TenantSelectionPage'
 import { InvalidApiKeyError, RequireApiKeError } from '@/api/lightrag'
 import { ZapIcon } from 'lucide-react'
+import { useTenantInitialization } from '@/hooks/useTenantInitialization'
 
 import GraphViewer from '@/features/GraphViewer'
 import DocumentManager from '@/features/DocumentManager'
@@ -18,10 +21,33 @@ import ApiSite from '@/features/ApiSite'
 
 import { Tabs, TabsContent } from '@/components/ui/Tabs'
 
+// Default tenant for single-tenant mode
+const DEFAULT_SINGLE_TENANT: Tenant = {
+  tenant_id: 'default',
+  name: 'Default',
+  description: 'Default single-tenant workspace',
+}
+
+// Default KB for single-tenant mode
+const DEFAULT_SINGLE_KB = {
+  kb_id: 'default',
+  tenant_id: 'default',
+  name: 'Default',
+  description: 'Default knowledge base',
+}
+
 function App() {
   const message = useBackendState.use.message()
   const enableHealthCheck = useSettingsStore.use.enableHealthCheck()
   const currentTab = useSettingsStore.use.currentTab()
+  const selectedTenant = useTenantState.use.selectedTenant()
+  const setSelectedTenant = useTenantState.use.setSelectedTenant()
+  const initializeTenantState = useTenantState.use.initializeFromStorage()
+  const multiTenantEnabled = useAuthStore(state => state.multiTenantEnabled)
+
+  // Auto-initialize tenant/KB on app load (fixes empty state on refresh)
+  useTenantInitialization()
+
   const [apiKeyAlertOpen, setApiKeyAlertOpen] = useState(false)
   const [initializing, setInitializing] = useState(true) // Add initializing state
   const versionCheckRef = useRef(false); // Prevent duplicate calls in Vite dev mode
@@ -40,6 +66,7 @@ function App() {
   // Set up mount/unmount status tracking
   useEffect(() => {
     isMountedRef.current = true;
+    initializeTenantState();
 
     // Handle page reload/unload
     const handleBeforeUnload = () => {
@@ -101,6 +128,12 @@ function App() {
       // Check if version info was already obtained in login page
       const versionCheckedFromLogin = sessionStorage.getItem('VERSION_CHECKED_FROM_LOGIN') === 'true';
       if (versionCheckedFromLogin) {
+        // Still need to check if we should auto-set default tenant/KB for single-tenant mode
+        const multiTenant = localStorage.getItem('LIGHTRAG-MULTI-TENANT') === 'true';
+        if (!multiTenant && !useTenantState.getState().selectedTenant) {
+          useTenantState.getState().setSelectedTenant(DEFAULT_SINGLE_TENANT);
+          useTenantState.getState().setSelectedKB(DEFAULT_SINGLE_KB);
+        }
         setInitializing(false); // Skip initialization if already checked
         return;
       }
@@ -111,6 +144,7 @@ function App() {
         // Get version info
         const token = localStorage.getItem('LIGHTRAG-API-TOKEN');
         const status = await getAuthStatus();
+        const isMultiTenant = status.multi_tenant_enabled ?? false;
 
         // If auth is not configured and a new token is returned, use the new token
         if (!status.auth_configured && status.access_token) {
@@ -120,7 +154,8 @@ function App() {
             status.core_version,
             status.api_version,
             status.webui_title || null,
-            status.webui_description || null
+            status.webui_description || null,
+            isMultiTenant
           );
         } else if (token && (status.core_version || status.api_version || status.webui_title || status.webui_description)) {
           // Otherwise use the old token (if it exists)
@@ -131,14 +166,31 @@ function App() {
             status.core_version,
             status.api_version,
             status.webui_title || null,
-            status.webui_description || null
+            status.webui_description || null,
+            isMultiTenant
           );
+        } else {
+          // Just update multi-tenant setting
+          useAuthStore.getState().setMultiTenantEnabled(isMultiTenant);
+        }
+
+        // In single-tenant mode, auto-set the default tenant and KB if not already set
+        if (!isMultiTenant && !useTenantState.getState().selectedTenant) {
+          console.log('[App] Single-tenant mode detected, setting default tenant and KB');
+          useTenantState.getState().setSelectedTenant(DEFAULT_SINGLE_TENANT);
+          useTenantState.getState().setSelectedKB(DEFAULT_SINGLE_KB);
         }
 
         // Set flag to indicate version info has been checked
         sessionStorage.setItem('VERSION_CHECKED_FROM_LOGIN', 'true');
       } catch (error) {
         console.error('Failed to get version info:', error);
+        // On error, assume single-tenant mode and set default tenant and KB
+        if (!useTenantState.getState().selectedTenant) {
+          console.log('[App] Error fetching auth status, defaulting to single-tenant mode');
+          useTenantState.getState().setSelectedTenant(DEFAULT_SINGLE_TENANT);
+          useTenantState.getState().setSelectedKB(DEFAULT_SINGLE_KB);
+        }
       } finally {
         // Ensure initializing is set to false even if there's an error
         setInitializing(false);
@@ -194,6 +246,9 @@ function App() {
               </div>
             </div>
           </div>
+        ) : multiTenantEnabled && !selectedTenant ? (
+          // Only show tenant selection in multi-tenant mode when no tenant is selected
+          <TenantSelectionPage onSelect={() => {}} />
         ) : (
           // Main content after initialization
           <main className="flex h-screen w-screen overflow-hidden">

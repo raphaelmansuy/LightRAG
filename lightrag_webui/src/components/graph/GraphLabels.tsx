@@ -73,49 +73,6 @@ const GraphLabels = () => {
     }
   }, [dropdownRefreshTrigger])
 
-  // Monitor pipeline state changes: busy -> idle
-  useEffect(() => {
-    if (prevPipelineBusy.current === true && pipelineBusy === false) {
-      console.log('Pipeline changed from busy to idle, marking for popular labels refresh')
-      shouldRefreshPopularLabelsRef.current = true
-    }
-    prevPipelineBusy.current = pipelineBusy
-  }, [pipelineBusy])
-
-  // Helper: Reload popular labels from backend
-  const reloadPopularLabels = useCallback(async () => {
-    if (!shouldRefreshPopularLabelsRef.current) return
-
-    console.log('Reloading popular labels (triggered by pipeline idle)')
-    try {
-      const popularLabels = await getPopularLabels(popularLabelsDefaultLimit)
-      SearchHistoryManager.clearHistory()
-
-      if (popularLabels.length === 0) {
-        const fallbackLabels = ['entity', 'relationship', 'document', 'concept']
-        await SearchHistoryManager.initializeWithDefaults(fallbackLabels)
-      } else {
-        await SearchHistoryManager.initializeWithDefaults(popularLabels)
-      }
-    } catch (error) {
-      console.error('Failed to reload popular labels:', error)
-      const fallbackLabels = ['entity', 'relationship', 'document']
-      SearchHistoryManager.clearHistory()
-      await SearchHistoryManager.initializeWithDefaults(fallbackLabels)
-    } finally {
-      // Always clear the flag
-      shouldRefreshPopularLabelsRef.current = false
-    }
-  }, [])
-
-  // Helper: Bump dropdown data to trigger refresh
-  const bumpDropdownData = useCallback(({ forceSelectKey = false } = {}) => {
-    setRefreshTrigger(prev => prev + 1)
-    if (forceSelectKey) {
-      setSelectKey(prev => prev + 1)
-    }
-  }, [])
-
   const fetchData = useCallback(
     async (query?: string): Promise<string[]> => {
       let results: string[] = [];
@@ -260,7 +217,6 @@ const GraphLabels = () => {
           searchInputClassName="max-h-8"
           triggerTooltip={t('graphPanel.graphLabels.selectTooltip')}
           fetcher={fetchData}
-          onBeforeOpen={handleDropdownBeforeOpen}
           renderOption={(item) => (
             <div className="truncate" title={item}>
               {item}

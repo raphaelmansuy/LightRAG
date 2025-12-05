@@ -25,27 +25,23 @@ uv pip install "lightrag-hku[api]"
 * 从源代码安装
 
 ```bash
-# 克隆仓库
+# Clone the repository
 git clone https://github.com/HKUDS/lightrag.git
 
-# 进入仓库目录
+# Change to the repository directory
 cd lightrag
 
-# 使用 uv (推荐)
-# 注意: uv sync 会自动在 .venv/ 目录创建虚拟环境
-uv sync --extra api
-source .venv/bin/activate  # 激活虚拟环境 (Linux/macOS)
-# Windows 系统: .venv\Scripts\activate
+# Create a Python virtual environment
+uv venv --seed --python 3.12
+source .venv/bin/acivate
 
-# 或使用 pip 与虚拟环境
-# python -m venv .venv
-# source .venv/bin/activate  # Windows: .venv\Scripts\activate
-# pip install -e ".[api]"
+# Install in editable mode with API support
+pip install -e ".[api]"
 
-# 构建前端代码
+# Build front-end artifacts
 cd lightrag_webui
-bun install --frozen-lockfile
-bun run build
+bun install --frozen-lockfile --production
+bun run build --emptyOutDir
 cd ..
 ```
 

@@ -52,6 +52,9 @@ from lightrag.api.routers.document_routes import (
 from lightrag.api.routers.query_routes import create_query_routes
 from lightrag.api.routers.graph_routes import create_graph_routes
 from lightrag.api.routers.ollama_api import OllamaAPI
+from lightrag.api.routers.tenant_routes import create_tenant_routes
+from lightrag.services.tenant_service import TenantService
+from lightrag.tenant_rag_manager import TenantRAGManager
 
 from lightrag.utils import logger, set_verbose_debug
 from lightrag.kg.shared_storage import (
@@ -73,6 +76,14 @@ load_dotenv(dotenv_path=".env", override=False)
 webui_title = os.getenv("WEBUI_TITLE")
 webui_description = os.getenv("WEBUI_DESCRIPTION")
 
+# Multi-tenant mode configuration
+# Set LIGHTRAG_MULTI_TENANT=true to enable multi-tenant mode with tenant selection UI
+multi_tenant_enabled = os.getenv("LIGHTRAG_MULTI_TENANT", "false").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+
 # Initialize config parser
 config = configparser.ConfigParser()
 config.read("config.ini")
@@ -90,7 +101,6 @@ class LLMConfigCache:
         # Initialize configurations based on binding conditions
         self.openai_llm_options = None
         self.gemini_llm_options = None
-        self.gemini_embedding_options = None
         self.ollama_llm_options = None
         self.ollama_embedding_options = None
 
@@ -284,9 +294,135 @@ def check_frontend_build():
         return (True, False)  # Assume assets exist and up-to-date on error
 
 
+def check_frontend_build():
+    """Check if frontend is built and optionally check if source is up-to-date
+
+    Returns:
+        bool: True if frontend is outdated, False if up-to-date or production environment
+    """
+    webui_dir = Path(__file__).parent / "webui"
+    index_html = webui_dir / "index.html"
+
+    # 1. Check if build files exist (required)
+    if not index_html.exists():
+        ASCIIColors.red("\n" + "=" * 80)
+        ASCIIColors.red("ERROR: Frontend Not Built")
+        ASCIIColors.red("=" * 80)
+        ASCIIColors.yellow("The WebUI frontend has not been built yet.")
+        ASCIIColors.yellow(
+            "Please build the frontend code first using the following commands:\n"
+        )
+        ASCIIColors.cyan("    cd lightrag_webui")
+        ASCIIColors.cyan("    bun install --frozen-lockfile")
+        ASCIIColors.cyan("    bun run build")
+        ASCIIColors.cyan("    cd ..")
+        ASCIIColors.yellow("\nThen restart the service.\n")
+        ASCIIColors.cyan(
+            "Note: Make sure you have Bun installed. Visit https://bun.sh for installation."
+        )
+        ASCIIColors.red("=" * 80 + "\n")
+        sys.exit(1)  # Exit immediately
+
+    # 2. Check if this is a development environment (source directory exists)
+    try:
+        source_dir = Path(__file__).parent.parent.parent / "lightrag_webui"
+        src_dir = source_dir / "src"
+
+        # Determine if this is a development environment: source directory exists and contains src directory
+        if not source_dir.exists() or not src_dir.exists():
+            # Production environment, skip source code check
+            logger.debug(
+                "Production environment detected, skipping source freshness check"
+            )
+            return False
+
+        # Development environment, perform source code timestamp check
+        logger.debug("Development environment detected, checking source freshness")
+
+        # Source code file extensions (files to check)
+        source_extensions = {
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".mjs",
+            ".cjs",  # TypeScript/JavaScript
+            ".css",
+            ".scss",
+            ".sass",
+            ".less",  # Style files
+            ".json",
+            ".jsonc",  # Configuration/data files
+            ".html",
+            ".htm",  # Template files
+            ".md",
+            ".mdx",  # Markdown
+        }
+
+        # Key configuration files (in lightrag_webui root directory)
+        key_files = [
+            source_dir / "package.json",
+            source_dir / "bun.lock",
+            source_dir / "vite.config.ts",
+            source_dir / "tsconfig.json",
+            source_dir / "tailraid.config.js",
+            source_dir / "index.html",
+        ]
+
+        # Get the latest modification time of source code
+        latest_source_time = 0
+
+        # Check source code files in src directory
+        for file_path in src_dir.rglob("*"):
+            if file_path.is_file():
+                # Only check source code files, ignore temporary files and logs
+                if file_path.suffix.lower() in source_extensions:
+                    mtime = file_path.stat().st_mtime
+                    latest_source_time = max(latest_source_time, mtime)
+
+        # Check key configuration files
+        for key_file in key_files:
+            if key_file.exists():
+                mtime = key_file.stat().st_mtime
+                latest_source_time = max(latest_source_time, mtime)
+
+        # Get build time
+        build_time = index_html.stat().st_mtime
+
+        # Compare timestamps (5 second tolerance to avoid file system time precision issues)
+        if latest_source_time > build_time + 5:
+            ASCIIColors.yellow("\n" + "=" * 80)
+            ASCIIColors.yellow("WARNING: Frontend Source Code Has Been Updated")
+            ASCIIColors.yellow("=" * 80)
+            ASCIIColors.yellow(
+                "The frontend source code is newer than the current build."
+            )
+            ASCIIColors.yellow(
+                "This might happen after 'git pull' or manual code changes.\n"
+            )
+            ASCIIColors.cyan(
+                "Recommended: Rebuild the frontend to use the latest changes:"
+            )
+            ASCIIColors.cyan("    cd lightrag_webui")
+            ASCIIColors.cyan("    bun install --frozen-lockfile")
+            ASCIIColors.cyan("    bun run build")
+            ASCIIColors.cyan("    cd ..")
+            ASCIIColors.yellow("\nThe server will continue with the current build.")
+            ASCIIColors.yellow("=" * 80 + "\n")
+            return True  # Frontend is outdated
+        else:
+            logger.info("Frontend build is up-to-date")
+            return False  # Frontend is up-to-date
+
+    except Exception as e:
+        # If check fails, log warning but don't affect startup
+        logger.warning(f"Failed to check frontend source freshness: {e}")
+        return False  # Assume up-to-date on error
+
+
 def create_app(args):
-    # Check frontend build first and get status
-    webui_assets_exist, is_frontend_outdated = check_frontend_build()
+    # Check frontend build first and get outdated status
+    is_frontend_outdated = check_frontend_build()
 
     # Create unified API version display with warning symbol if frontend is outdated
     api_version_display = (
@@ -644,7 +780,7 @@ def create_app(args):
 
     def create_optimized_embedding_function(
         config_cache: LLMConfigCache, binding, model, host, api_key, args
-    ) -> EmbeddingFunc:
+    ):
         """
         Create optimized embedding function and return an EmbeddingFunc instance
         with proper max_token_size inheritance from provider defaults.
@@ -667,64 +803,6 @@ def create_app(args):
         explicitly pass embedding_dim to the provider's underlying function.
         """
 
-        # Step 1: Import provider function and extract default attributes
-        provider_func = None
-        provider_max_token_size = None
-        provider_embedding_dim = None
-
-        try:
-            if binding == "openai":
-                from lightrag.llm.openai import openai_embed
-
-                provider_func = openai_embed
-            elif binding == "ollama":
-                from lightrag.llm.ollama import ollama_embed
-
-                provider_func = ollama_embed
-            elif binding == "gemini":
-                from lightrag.llm.gemini import gemini_embed
-
-                provider_func = gemini_embed
-            elif binding == "jina":
-                from lightrag.llm.jina import jina_embed
-
-                provider_func = jina_embed
-            elif binding == "azure_openai":
-                from lightrag.llm.azure_openai import azure_openai_embed
-
-                provider_func = azure_openai_embed
-            elif binding == "aws_bedrock":
-                from lightrag.llm.bedrock import bedrock_embed
-
-                provider_func = bedrock_embed
-            elif binding == "lollms":
-                from lightrag.llm.lollms import lollms_embed
-
-                provider_func = lollms_embed
-
-            # Extract attributes if provider is an EmbeddingFunc
-            if provider_func and isinstance(provider_func, EmbeddingFunc):
-                provider_max_token_size = provider_func.max_token_size
-                provider_embedding_dim = provider_func.embedding_dim
-                logger.debug(
-                    f"Extracted from {binding} provider: "
-                    f"max_token_size={provider_max_token_size}, "
-                    f"embedding_dim={provider_embedding_dim}"
-                )
-        except ImportError as e:
-            logger.warning(f"Could not import provider function for {binding}: {e}")
-
-        # Step 2: Apply priority (user config > provider default)
-        # For max_token_size: explicit env var > provider default > None
-        final_max_token_size = args.embedding_token_limit or provider_max_token_size
-        # For embedding_dim: user config (always has value) takes priority
-        # Only use provider default if user config is explicitly None (which shouldn't happen)
-        final_embedding_dim = (
-            args.embedding_dim if args.embedding_dim else provider_embedding_dim
-        )
-
-        # Step 3: Create optimized embedding function (calls underlying function directly)
-        # Note: When model is None, each binding will use its own default model
         async def optimized_embedding_function(texts, embedding_dim=None):
             try:
                 if binding == "lollms":
@@ -796,10 +874,11 @@ def create_app(args):
                 elif binding == "jina":
                     from lightrag.llm.jina import jina_embed
 
-                    actual_func = (
-                        jina_embed.func
-                        if isinstance(jina_embed, EmbeddingFunc)
-                        else jina_embed
+                    return await jina_embed(
+                        texts,
+                        embedding_dim=embedding_dim,
+                        base_url=host,
+                        api_key=api_key,
                     )
                     # Pass model only if provided, let function use its default (jina-embeddings-v4)
                     kwargs = {
@@ -844,10 +923,12 @@ def create_app(args):
                 else:  # openai and compatible
                     from lightrag.llm.openai import openai_embed
 
-                    actual_func = (
-                        openai_embed.func
-                        if isinstance(openai_embed, EmbeddingFunc)
-                        else openai_embed
+                    return await openai_embed(
+                        texts,
+                        model=model,
+                        base_url=host,
+                        api_key=api_key,
+                        embedding_dim=embedding_dim,
                     )
                     # Pass model only if provided, let function use its default (text-embedding-3-small)
                     kwargs = {
@@ -910,17 +991,50 @@ def create_app(args):
             **kwargs,
         )
 
-    # Create embedding function with optimized configuration and max_token_size inheritance
+    # Create embedding function with optimized configuration
     import inspect
 
-    # Create the EmbeddingFunc instance (now returns complete EmbeddingFunc with max_token_size)
-    embedding_func = create_optimized_embedding_function(
+    # Create the optimized embedding function
+    optimized_embedding_func = create_optimized_embedding_function(
         config_cache=config_cache,
         binding=args.embedding_binding,
         model=args.embedding_model,
         host=args.embedding_binding_host,
         api_key=args.embedding_binding_api_key,
-        args=args,
+        args=args,  # Pass args object for fallback option generation
+    )
+
+    # Check environment variable for sending dimensions
+    embedding_send_dim = os.getenv("EMBEDDING_SEND_DIM", "false").lower() == "true"
+
+    # Check if the function signature has embedding_dim parameter
+    # Note: Since optimized_embedding_func is an async function, inspect its signature
+    sig = inspect.signature(optimized_embedding_func)
+    has_embedding_dim_param = "embedding_dim" in sig.parameters
+
+    # Determine send_dimensions value based on binding type
+    # Jina REQUIRES dimension parameter (forced to True)
+    # OpenAI and others: controlled by EMBEDDING_SEND_DIM environment variable
+    if args.embedding_binding == "jina":
+        # Jina API requires dimension parameter - always send it
+        send_dimensions = has_embedding_dim_param
+        dimension_control = "forced (Jina API requirement)"
+    else:
+        # For OpenAI and other bindings, respect EMBEDDING_SEND_DIM setting
+        send_dimensions = embedding_send_dim and has_embedding_dim_param
+        dimension_control = f"env_var={embedding_send_dim}"
+
+    logger.info(
+        f"Embedding configuration: send_dimensions={send_dimensions} "
+        f"({dimension_control}, has_param={has_embedding_dim_param}, "
+        f"binding={args.embedding_binding})"
+    )
+
+    # Create EmbeddingFunc with send_dimensions attribute
+    embedding_func = EmbeddingFunc(
+        embedding_dim=args.embedding_dim,
+        func=optimized_embedding_func,
+        send_dimensions=send_dimensions,
     )
 
     # Get embedding_send_dim from centralized configuration
@@ -1081,20 +1195,56 @@ def create_app(args):
         logger.error(f"Failed to initialize LightRAG: {e}")
         raise
 
-    # Add routes
+    # Initialize multi-tenant components if enabled
+    # NOTE: These are initialized here but need the db pool to be ready before use.
+    # The tenant_service uses rag.full_docs.db for database access (initialized in lifespan).
+    tenant_service = None
+    rag_manager = None
+    if multi_tenant_enabled:
+        try:
+            # Create TenantService - will use rag.full_docs for db access
+            # The db pool is initialized in the lifespan context
+            tenant_service = TenantService(rag.full_docs)
+
+            # Initialize tenant RAG manager with template RAG
+            rag_manager = TenantRAGManager(
+                base_working_dir=args.working_dir,
+                tenant_service=tenant_service,
+                template_rag=rag,
+                max_cached_instances=100,
+            )
+
+            # Store in app.state for use by dependencies
+            app.state.tenant_service = tenant_service
+            app.state.rag_manager = rag_manager
+
+            logger.info("Multi-tenant mode enabled - tenant components initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize multi-tenant components: {e}")
+            raise
+
+    # Add routes (rag_manager is passed for multi-tenant support, None for single-tenant)
     app.include_router(
         create_document_routes(
             rag,
             doc_manager,
             api_key,
+            rag_manager=rag_manager,
         )
     )
-    app.include_router(create_query_routes(rag, api_key, args.top_k))
-    app.include_router(create_graph_routes(rag, api_key))
+    app.include_router(
+        create_query_routes(rag, api_key, args.top_k, rag_manager=rag_manager)
+    )
+    app.include_router(create_graph_routes(rag, api_key, rag_manager=rag_manager))
 
     # Add Ollama API routes
     ollama_api = OllamaAPI(rag, top_k=args.top_k, api_key=api_key)
     app.include_router(ollama_api.router, prefix="/api")
+
+    # Add tenant routes if multi-tenant mode is enabled
+    if multi_tenant_enabled and tenant_service:
+        app.include_router(create_tenant_routes(tenant_service))
+        logger.info("Multi-tenant routes registered")
 
     # Custom Swagger UI endpoint for offline support
     @app.get("/docs", include_in_schema=False)
@@ -1137,6 +1287,7 @@ def create_app(args):
                 "access_token": guest_token,
                 "token_type": "bearer",
                 "auth_mode": "disabled",
+                "multi_tenant_enabled": multi_tenant_enabled,
                 "message": "Authentication is disabled. Using guest access.",
                 "core_version": core_version,
                 "api_version": api_version_display,
@@ -1147,6 +1298,7 @@ def create_app(args):
         return {
             "auth_configured": True,
             "auth_mode": "enabled",
+            "multi_tenant_enabled": multi_tenant_enabled,
             "core_version": core_version,
             "api_version": api_version_display,
             "webui_title": webui_title,
@@ -1174,9 +1326,40 @@ def create_app(args):
         if auth_handler.accounts.get(username) != form_data.password:
             raise HTTPException(status_code=401, detail="Incorrect credentials")
 
-        # Regular user login
+        # Determine role for this user. If the user is configured as a super-admin
+        # (via LIGHTRAG_SUPER_ADMIN_USERS or config.SUPER_ADMIN_USERS), grant the
+        # `admin` role; otherwise default to `user`.
+        role = "user"
+        try:
+            # Prefer config-level setting when available
+            from lightrag.api.config import SUPER_ADMIN_USERS
+
+            if SUPER_ADMIN_USERS:
+                super_admins = [
+                    u.strip().lower() for u in SUPER_ADMIN_USERS.split(",") if u.strip()
+                ]
+            else:
+                super_admins = []
+        except Exception:
+            # Fallback to env var (None = default 'admin', empty string = no super-admins)
+            import os
+
+            env_super_admins = os.environ.get("LIGHTRAG_SUPER_ADMIN_USERS")
+            if env_super_admins is None:
+                super_admins = ["admin"]
+            elif env_super_admins.strip():
+                super_admins = [
+                    u.strip().lower() for u in env_super_admins.split(",") if u.strip()
+                ]
+            else:
+                super_admins = []
+
+        if username and username.lower() in super_admins:
+            role = "admin"
+
+        # Regular user login (role may be 'admin' if configured)
         user_token = auth_handler.create_token(
-            username=username, role="user", metadata={"auth_mode": "enabled"}
+            username=username, role=role, metadata={"auth_mode": "enabled"}
         )
         return {
             "access_token": user_token,
@@ -1283,6 +1466,7 @@ def create_app(args):
                     "embedding_batch_num": args.embedding_batch_num,
                 },
                 "auth_mode": auth_mode,
+                "multi_tenant_enabled": multi_tenant_enabled,
                 "pipeline_busy": pipeline_status.get("busy", False),
                 "keyed_locks": keyed_lock_info,
                 "core_version": core_version,
@@ -1332,27 +1516,16 @@ def create_app(args):
             name="swagger-ui-static",
         )
 
-    # Conditionally mount WebUI only if assets exist
-    if webui_assets_exist:
-        static_dir = Path(__file__).parent / "webui"
-        static_dir.mkdir(exist_ok=True)
-        app.mount(
-            "/webui",
-            SmartStaticFiles(
-                directory=static_dir, html=True, check_dir=True
-            ),  # Use SmartStaticFiles
-            name="webui",
-        )
-        logger.info("WebUI assets mounted at /webui")
-    else:
-        logger.info("WebUI assets not available, /webui route not mounted")
-
-        # Add redirect for /webui when assets are not available
-        @app.get("/webui")
-        @app.get("/webui/")
-        async def webui_redirect_to_docs():
-            """Redirect /webui to /docs when WebUI is not available"""
-            return RedirectResponse(url="/docs")
+    # Webui mount webui/index.html
+    static_dir = Path(__file__).parent / "webui"
+    static_dir.mkdir(exist_ok=True)
+    app.mount(
+        "/webui",
+        SmartStaticFiles(
+            directory=static_dir, html=True, check_dir=True
+        ),  # Use SmartStaticFiles
+        name="webui",
+    )
 
     return app
 

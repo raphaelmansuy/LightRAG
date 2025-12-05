@@ -8,7 +8,6 @@ import logging
 from dotenv import load_dotenv
 from lightrag.utils import get_env_value
 from lightrag.llm.binding_options import (
-    GeminiEmbeddingOptions,
     GeminiLLMOptions,
     OllamaEmbeddingOptions,
     OllamaLLMOptions,
@@ -320,7 +319,10 @@ def parse_args() -> argparse.Namespace:
     elif os.environ.get("LLM_BINDING") == "gemini":
         GeminiLLMOptions.add_args(parser)
 
-    args = parser.parse_args()
+    # Use parse_known_args so unknown arguments (e.g. pytest's CLI flags)
+    # do not cause a SystemExit during test collection or when importing
+    # this module in other tooling. Unknown args will be ignored.
+    args, _ = parser.parse_known_args()
 
     # convert relative path to absolute path
     args.working_dir = os.path.abspath(args.working_dir)
@@ -390,6 +392,9 @@ def parse_args() -> argparse.Namespace:
         args.document_loading_engine = get_env_value(
             "DOCUMENT_LOADING_ENGINE", "DEFAULT"
         )
+
+    # PDF decryption password
+    args.pdf_decrypt_password = get_env_value("PDF_DECRYPT_PASSWORD", None)
 
     # PDF decryption password
     args.pdf_decrypt_password = get_env_value("PDF_DECRYPT_PASSWORD", None)

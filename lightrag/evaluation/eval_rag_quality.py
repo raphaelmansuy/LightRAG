@@ -62,15 +62,6 @@ warnings.filterwarnings(
     category=DeprecationWarning,
 )
 
-# Suppress token usage warning for custom OpenAI-compatible endpoints
-# Custom endpoints (vLLM, SGLang, etc.) often don't return usage information
-# This is non-critical as token tracking is not required for RAGAS evaluation
-warnings.filterwarnings(
-    "ignore",
-    message=".*Unexpected type for token usage.*",
-    category=UserWarning,
-)
-
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -91,7 +82,7 @@ try:
     )
     from ragas.llms import LangchainLLMWrapper
     from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-    from tqdm.auto import tqdm
+    from tqdm import tqdm
 
     RAGAS_AVAILABLE = True
 
@@ -127,10 +118,8 @@ class RAGEvaluator:
         Environment Variables:
             EVAL_LLM_MODEL: LLM model for evaluation (default: gpt-4o-mini)
             EVAL_EMBEDDING_MODEL: Embedding model for evaluation (default: text-embedding-3-small)
-            EVAL_LLM_BINDING_API_KEY: API key for LLM (fallback to OPENAI_API_KEY)
-            EVAL_LLM_BINDING_HOST: Custom endpoint URL for LLM (optional)
-            EVAL_EMBEDDING_BINDING_API_KEY: API key for embeddings (fallback: EVAL_LLM_BINDING_API_KEY -> OPENAI_API_KEY)
-            EVAL_EMBEDDING_BINDING_HOST: Custom endpoint URL for embeddings (fallback: EVAL_LLM_BINDING_HOST)
+            EVAL_LLM_BINDING_API_KEY: API key for evaluation models (fallback to OPENAI_API_KEY)
+            EVAL_LLM_BINDING_HOST: Custom endpoint URL for evaluation models (optional)
 
         Raises:
             ImportError: If ragas or datasets packages are not installed
@@ -143,11 +132,11 @@ class RAGEvaluator:
                 "Install with: pip install ragas datasets"
             )
 
-        # Configure evaluation LLM (for RAGAS scoring)
-        eval_llm_api_key = os.getenv("EVAL_LLM_BINDING_API_KEY") or os.getenv(
+        # Configure evaluation models (for RAGAS scoring)
+        eval_api_key = os.getenv("EVAL_LLM_BINDING_API_KEY") or os.getenv(
             "OPENAI_API_KEY"
         )
-        if not eval_llm_api_key:
+        if not eval_api_key:
             raise EnvironmentError(
                 "EVAL_LLM_BINDING_API_KEY or OPENAI_API_KEY is required for evaluation. "
                 "Set EVAL_LLM_BINDING_API_KEY to use a custom API key, "
@@ -155,40 +144,23 @@ class RAGEvaluator:
             )
 
         eval_model = os.getenv("EVAL_LLM_MODEL", "gpt-4o-mini")
-        eval_llm_base_url = os.getenv("EVAL_LLM_BINDING_HOST")
-
-        # Configure evaluation embeddings (for RAGAS scoring)
-        # Fallback chain: EVAL_EMBEDDING_BINDING_API_KEY -> EVAL_LLM_BINDING_API_KEY -> OPENAI_API_KEY
-        eval_embedding_api_key = (
-            os.getenv("EVAL_EMBEDDING_BINDING_API_KEY")
-            or os.getenv("EVAL_LLM_BINDING_API_KEY")
-            or os.getenv("OPENAI_API_KEY")
-        )
         eval_embedding_model = os.getenv(
             "EVAL_EMBEDDING_MODEL", "text-embedding-3-large"
         )
-        # Fallback chain: EVAL_EMBEDDING_BINDING_HOST -> EVAL_LLM_BINDING_HOST -> None
-        eval_embedding_base_url = os.getenv("EVAL_EMBEDDING_BINDING_HOST") or os.getenv(
-            "EVAL_LLM_BINDING_HOST"
-        )
+        eval_base_url = os.getenv("EVAL_LLM_BINDING_HOST")
 
         # Create LLM and Embeddings instances for RAGAS
         llm_kwargs = {
             "model": eval_model,
-            "api_key": eval_llm_api_key,
+            "api_key": eval_api_key,
             "max_retries": int(os.getenv("EVAL_LLM_MAX_RETRIES", "5")),
             "request_timeout": int(os.getenv("EVAL_LLM_TIMEOUT", "180")),
         }
-        embedding_kwargs = {
-            "model": eval_embedding_model,
-            "api_key": eval_embedding_api_key,
-        }
+        embedding_kwargs = {"model": eval_embedding_model, "api_key": eval_api_key}
 
-        if eval_llm_base_url:
-            llm_kwargs["base_url"] = eval_llm_base_url
-
-        if eval_embedding_base_url:
-            embedding_kwargs["base_url"] = eval_embedding_base_url
+        if eval_base_url:
+            llm_kwargs["base_url"] = eval_base_url
+            embedding_kwargs["base_url"] = eval_base_url
 
         # Create base LangChain LLM
         base_llm = ChatOpenAI(**llm_kwargs)
@@ -228,8 +200,7 @@ class RAGEvaluator:
         # Store configuration values for display
         self.eval_model = eval_model
         self.eval_embedding_model = eval_embedding_model
-        self.eval_llm_base_url = eval_llm_base_url
-        self.eval_embedding_base_url = eval_embedding_base_url
+        self.eval_base_url = eval_base_url
         self.eval_max_retries = llm_kwargs["max_retries"]
         self.eval_timeout = llm_kwargs["request_timeout"]
 
@@ -241,29 +212,13 @@ class RAGEvaluator:
         logger.info("Evaluation Models:")
         logger.info("  • LLM Model:            %s", self.eval_model)
         logger.info("  • Embedding Model:      %s", self.eval_embedding_model)
-
-        # Display LLM endpoint
-        if self.eval_llm_base_url:
-            logger.info("  • LLM Endpoint:         %s", self.eval_llm_base_url)
+        if self.eval_base_url:
+            logger.info("  • Custom Endpoint:      %s", self.eval_base_url)
             logger.info(
-                "  • Bypass N-Parameter:   Enabled (use LangchainLLMWrapper for compatibility)"
+                "  • Bypass N-Parameter:   Enabled (use LangchainLLMWrapperfor compatibility)"
             )
         else:
-            logger.info("  • LLM Endpoint:         OpenAI Official API")
-
-        # Display Embedding endpoint (only if different from LLM)
-        if self.eval_embedding_base_url:
-            if self.eval_embedding_base_url != self.eval_llm_base_url:
-                logger.info(
-                    "  • Embedding Endpoint:   %s", self.eval_embedding_base_url
-                )
-            # If same as LLM endpoint, no need to display separately
-        elif not self.eval_llm_base_url:
-            # Both using OpenAI - already displayed above
-            pass
-        else:
-            # LLM uses custom endpoint, but embeddings use OpenAI
-            logger.info("  • Embedding Endpoint:   OpenAI Official API")
+            logger.info("  • Endpoint:             OpenAI Official API")
 
         logger.info("Concurrency & Rate Limiting:")
         query_top_k = int(os.getenv("EVAL_QUERY_TOP_K", "10"))
@@ -392,36 +347,28 @@ class RAGEvaluator:
         self,
         idx: int,
         test_case: Dict[str, str],
-        rag_semaphore: asyncio.Semaphore,
-        eval_semaphore: asyncio.Semaphore,
+        semaphore: asyncio.Semaphore,
         client: httpx.AsyncClient,
         progress_counter: Dict[str, int],
-        position_pool: asyncio.Queue,
-        pbar_creation_lock: asyncio.Lock,
     ) -> Dict[str, Any]:
         """
-        Evaluate a single test case with two-stage pipeline concurrency control
+        Evaluate a single test case with concurrency control
 
         Args:
             idx: Test case index (1-based)
             test_case: Test case dictionary with question and ground_truth
-            rag_semaphore: Semaphore to control overall concurrency (covers entire function)
-            eval_semaphore: Semaphore to control RAGAS evaluation concurrency (Stage 2)
+            semaphore: Semaphore to control concurrency
             client: Shared httpx AsyncClient for connection pooling
             progress_counter: Shared dictionary for progress tracking
-            position_pool: Queue of available tqdm position indices
-            pbar_creation_lock: Lock to serialize tqdm creation and prevent race conditions
 
         Returns:
             Evaluation result dictionary
         """
-        # rag_semaphore controls the entire evaluation process to prevent
-        # all RAG responses from being generated at once when eval is slow
-        async with rag_semaphore:
+        async with semaphore:
             question = test_case["question"]
             ground_truth = test_case["ground_truth"]
 
-            # Stage 1: Generate RAG response
+            # Generate RAG response by calling actual LightRAG API
             try:
                 rag_response = await self.generate_rag_response(
                     question=question, client=client
@@ -441,6 +388,11 @@ class RAGEvaluator:
             # *** CRITICAL FIX: Use actual retrieved contexts, NOT ground_truth ***
             retrieved_contexts = rag_response["contexts"]
 
+            # DEBUG: Print what was actually retrieved (only in debug mode)
+            logger.debug(
+                "📝 Test %s: Retrieved %s contexts", idx, len(retrieved_contexts)
+            )
+
             # Prepare dataset for RAGAS evaluation with CORRECT contexts
             eval_dataset = Dataset.from_dict(
                 {
@@ -451,141 +403,106 @@ class RAGEvaluator:
                 }
             )
 
-            # Stage 2: Run RAGAS evaluation (controlled by eval_semaphore)
+            # Run RAGAS evaluation
             # IMPORTANT: Create fresh metric instances for each evaluation to avoid
             # concurrent state conflicts when multiple tasks run in parallel
-            async with eval_semaphore:
-                pbar = None
-                position = None
-                try:
-                    # Acquire a position from the pool for this tqdm progress bar
-                    position = await position_pool.get()
+            pbar = None
+            try:
+                # Create standard tqdm progress bar for RAGAS evaluation
+                pbar = tqdm(total=4, desc=f"Eval-{idx}", leave=True)
 
-                    # Serialize tqdm creation to prevent race conditions
-                    # Multiple tasks creating tqdm simultaneously can cause display conflicts
-                    async with pbar_creation_lock:
-                        # Create tqdm progress bar with assigned position to avoid overlapping
-                        # leave=False ensures the progress bar is cleared after completion,
-                        # preventing accumulation of completed bars and allowing position reuse
-                        pbar = tqdm(
-                            total=4,
-                            desc=f"Eval-{idx:02d}",
-                            position=position,
-                            leave=False,
-                        )
-                        # Give tqdm time to initialize and claim its screen position
-                        await asyncio.sleep(0.05)
+                eval_results = evaluate(
+                    dataset=eval_dataset,
+                    metrics=[
+                        Faithfulness(),
+                        AnswerRelevancy(),
+                        ContextRecall(),
+                        ContextPrecision(),
+                    ],
+                    llm=self.eval_llm,
+                    embeddings=self.eval_embeddings,
+                    _pbar=pbar,
+                )
 
-                    eval_results = evaluate(
-                        dataset=eval_dataset,
-                        metrics=[
-                            Faithfulness(),
-                            AnswerRelevancy(),
-                            ContextRecall(),
-                            ContextPrecision(),
-                        ],
-                        llm=self.eval_llm,
-                        embeddings=self.eval_embeddings,
-                        _pbar=pbar,
-                    )
+                # Convert to DataFrame (RAGAS v0.3+ API)
+                df = eval_results.to_pandas()
 
-                    # Convert to DataFrame (RAGAS v0.3+ API)
-                    df = eval_results.to_pandas()
+                # Extract scores from first row
+                scores_row = df.iloc[0]
 
-                    # Extract scores from first row
-                    scores_row = df.iloc[0]
+                # Extract scores (RAGAS v0.3+ uses .to_pandas())
+                result = {
+                    "test_number": idx,
+                    "question": question,
+                    "answer": rag_response["answer"][:200] + "..."
+                    if len(rag_response["answer"]) > 200
+                    else rag_response["answer"],
+                    "ground_truth": ground_truth[:200] + "..."
+                    if len(ground_truth) > 200
+                    else ground_truth,
+                    "project": test_case.get("project", "unknown"),
+                    "metrics": {
+                        "faithfulness": float(scores_row.get("faithfulness", 0)),
+                        "answer_relevance": float(
+                            scores_row.get("answer_relevancy", 0)
+                        ),
+                        "context_recall": float(scores_row.get("context_recall", 0)),
+                        "context_precision": float(
+                            scores_row.get("context_precision", 0)
+                        ),
+                    },
+                    "timestamp": datetime.now().isoformat(),
+                }
 
-                    # Extract scores (RAGAS v0.3+ uses .to_pandas())
-                    result = {
-                        "test_number": idx,
-                        "question": question,
-                        "answer": rag_response["answer"][:200] + "..."
-                        if len(rag_response["answer"]) > 200
-                        else rag_response["answer"],
-                        "ground_truth": ground_truth[:200] + "..."
-                        if len(ground_truth) > 200
-                        else ground_truth,
-                        "project": test_case.get("project", "unknown"),
-                        "metrics": {
-                            "faithfulness": float(scores_row.get("faithfulness", 0)),
-                            "answer_relevance": float(
-                                scores_row.get("answer_relevancy", 0)
-                            ),
-                            "context_recall": float(
-                                scores_row.get("context_recall", 0)
-                            ),
-                            "context_precision": float(
-                                scores_row.get("context_precision", 0)
-                            ),
-                        },
-                        "timestamp": datetime.now().isoformat(),
-                    }
+                # Calculate RAGAS score (average of all metrics, excluding NaN values)
+                metrics = result["metrics"]
+                valid_metrics = [v for v in metrics.values() if not _is_nan(v)]
+                ragas_score = (
+                    sum(valid_metrics) / len(valid_metrics) if valid_metrics else 0
+                )
+                result["ragas_score"] = round(ragas_score, 4)
 
-                    # Calculate RAGAS score (average of all metrics, excluding NaN values)
-                    metrics = result["metrics"]
-                    valid_metrics = [v for v in metrics.values() if not _is_nan(v)]
-                    ragas_score = (
-                        sum(valid_metrics) / len(valid_metrics) if valid_metrics else 0
-                    )
-                    result["ragas_score"] = round(ragas_score, 4)
+                # Update progress counter
+                progress_counter["completed"] += 1
 
-                    # Update progress counter
-                    progress_counter["completed"] += 1
+                return result
 
-                    return result
-
-                except Exception as e:
-                    logger.error("Error evaluating test %s: %s", idx, str(e))
-                    progress_counter["completed"] += 1
-                    return {
-                        "test_number": idx,
-                        "question": question,
-                        "error": str(e),
-                        "metrics": {},
-                        "ragas_score": 0,
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                finally:
-                    # Force close progress bar to ensure completion
-                    if pbar is not None:
-                        pbar.close()
-                    # Release the position back to the pool for reuse
-                    if position is not None:
-                        await position_pool.put(position)
+            except Exception as e:
+                logger.error("Error evaluating test %s: %s", idx, str(e))
+                progress_counter["completed"] += 1
+                return {
+                    "test_number": idx,
+                    "question": question,
+                    "error": str(e),
+                    "metrics": {},
+                    "ragas_score": 0,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            finally:
+                # Force close progress bar to ensure completion
+                if pbar is not None:
+                    pbar.close()
 
     async def evaluate_responses(self) -> List[Dict[str, Any]]:
         """
-        Evaluate all test cases in parallel with two-stage pipeline and return metrics
+        Evaluate all test cases in parallel and return metrics
 
         Returns:
             List of evaluation results with metrics
         """
-        # Get evaluation concurrency from environment (default to 2 for parallel evaluation)
+        # Get evaluation concurrency from environment (default to 1 for serial evaluation)
         max_async = int(os.getenv("EVAL_MAX_CONCURRENT", "2"))
 
         logger.info("%s", "=" * 70)
         logger.info("🚀 Starting RAGAS Evaluation of LightRAG System")
-        logger.info("🔧 RAGAS Evaluation (Stage 2): %s concurrent", max_async)
+        logger.info("🔧 Concurrent evaluations: %s", max_async)
         logger.info("%s", "=" * 70)
 
-        # Create two-stage pipeline semaphores
-        # Stage 1: RAG generation - allow x2 concurrency to keep evaluation fed
-        rag_semaphore = asyncio.Semaphore(max_async * 2)
-        # Stage 2: RAGAS evaluation - primary bottleneck
-        eval_semaphore = asyncio.Semaphore(max_async)
+        # Create semaphore to limit concurrent evaluations
+        semaphore = asyncio.Semaphore(max_async)
 
         # Create progress counter (shared across all tasks)
         progress_counter = {"completed": 0}
-
-        # Create position pool for tqdm progress bars
-        # Positions range from 0 to max_async-1, ensuring no overlapping displays
-        position_pool = asyncio.Queue()
-        for i in range(max_async):
-            await position_pool.put(i)
-
-        # Create lock to serialize tqdm creation and prevent race conditions
-        # This ensures progress bars are created one at a time, avoiding display conflicts
-        pbar_creation_lock = asyncio.Lock()
 
         # Create shared HTTP client with connection pooling and proper timeouts
         # Timeout: 3 minutes for connect, 5 minutes for read (LLM can be slow)
@@ -595,27 +512,20 @@ class RAGEvaluator:
             read=READ_TIMEOUT_SECONDS,
         )
         limits = httpx.Limits(
-            max_connections=(max_async + 1) * 2,  # Allow buffer for RAG stage
-            max_keepalive_connections=max_async + 1,
+            max_connections=max_async * 2,  # Allow some buffer
+            max_keepalive_connections=max_async,
         )
 
         async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
             # Create tasks for all test cases
             tasks = [
                 self.evaluate_single_case(
-                    idx,
-                    test_case,
-                    rag_semaphore,
-                    eval_semaphore,
-                    client,
-                    progress_counter,
-                    position_pool,
-                    pbar_creation_lock,
+                    idx, test_case, semaphore, client, progress_counter
                 )
                 for idx, test_case in enumerate(self.test_cases, 1)
             ]
 
-            # Run all evaluations in parallel (limited by two-stage semaphores)
+            # Run all evaluations in parallel (limited by semaphore)
             results = await asyncio.gather(*tasks)
 
         return list(results)
@@ -702,7 +612,6 @@ class RAGEvaluator:
         Args:
             results: List of evaluation results
         """
-        logger.info("")
         logger.info("%s", "=" * 115)
         logger.info("📊 EVALUATION RESULTS SUMMARY")
         logger.info("%s", "=" * 115)
@@ -888,9 +797,6 @@ class RAGEvaluator:
             "results": results,
         }
 
-        # Display results table
-        self._display_results_table(results)
-
         # Save JSON results
         json_path = (
             self.results_dir
@@ -899,8 +805,14 @@ class RAGEvaluator:
         with open(json_path, "w") as f:
             json.dump(summary, f, indent=2)
 
+        # Display results table
+        self._display_results_table(results)
+
+        logger.info("✅ JSON results saved to: %s", json_path)
+
         # Export to CSV
         csv_path = self._export_to_csv(results)
+        logger.info("✅ CSV results saved to: %s", csv_path)
 
         # Print summary
         logger.info("")
@@ -925,7 +837,7 @@ class RAGEvaluator:
         logger.info("Average Context Recall:    %.4f", avg["context_recall"])
         logger.info("Average Context Precision: %.4f", avg["context_precision"])
         logger.info("Average RAGAS Score:       %.4f", avg["ragas_score"])
-        logger.info("%s", "-" * 70)
+        logger.info("")
         logger.info(
             "Min RAGAS Score:           %.4f",
             benchmark_stats["min_ragas_score"],

@@ -147,13 +147,26 @@
       "errors": {
         "loadFailed": "加载文档失败\n{{error}}",
         "scanFailed": "扫描文档失败\n{{error}}",
-        "scanProgressFailed": "获取扫描进度失败\n{{error}}"
+        "scanProgressFailed": "获取扫描进度失败\n{{error}}",
+        "resetFailed": "重置文档状态失败\n{{error}}"
       },
+      "retry": "重试",
+      "resetToPending": "将选中的文档重置为待处理状态以便重试",
+      "resetSuccess": "成功重置 {{count}} 个文档",
+      "resetPartial": "已重置 {{count}} 个文档，{{failed}} 个失败",
+      "resetFailed": "重置文档失败",
       "fileNameLabel": "文件名",
       "showButton": "显示",
       "hideButton": "隐藏",
       "showFileNameTooltip": "显示文件名",
-      "hideFileNameTooltip": "隐藏文件名"
+      "hideFileNameTooltip": "隐藏文件名",
+      "loading": "正在加载文档...",
+      "loadingHint": "请稍候",
+      "emptyWithPipelineTitle": "处理进行中",
+      "emptyWithPipelineDescription": "文档正在流水线中处理。您可以扫描新文档或查看流水线状态。",
+      "scanForDocuments": "扫描文档",
+      "viewPipeline": "查看流水线",
+      "emptyHint": "使用上方按钮上传文档，或扫描输入文件夹中的文档。"
     },
     "pipelineStatus": {
       "title": "流水线状态",

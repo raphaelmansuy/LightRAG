@@ -1,6 +1,7 @@
 import Button from '@/components/ui/Button'
 import { SiteInfo, webuiPrefix } from '@/lib/constants'
 import AppSettings from '@/components/AppSettings'
+import TenantSelector from '@/components/TenantSelector'
 import { TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { useSettingsStore } from '@/stores/settings'
 import { useAuthStore } from '@/stores/state'
@@ -56,7 +57,7 @@ function TabsNavigation() {
 
 export default function SiteHeader() {
   const { t } = useTranslation()
-  const { isGuestMode, coreVersion, apiVersion, username, webuiTitle, webuiDescription } = useAuthStore()
+  const { isGuestMode, coreVersion, apiVersion, username, webuiTitle, webuiDescription, multiTenantEnabled } = useAuthStore()
 
   const versionDisplay = (coreVersion && apiVersion)
     ? `${coreVersion}/${apiVersion}`
@@ -73,7 +74,7 @@ export default function SiteHeader() {
   }
 
   return (
-    <header className="border-border/40 bg-background/95 supports-[backdrop-filter]:bg-background/60 sticky top-0 z-50 flex h-10 w-full border-b px-4 backdrop-blur">
+    <header className="border-border/40 bg-background/95 supports-backdrop-filter:bg-background/60 sticky top-0 z-50 flex h-16 w-full border-b px-4 backdrop-blur items-center gap-4">
       <div className="min-w-[200px] w-auto flex items-center">
         <a href={webuiPrefix} className="flex items-center gap-2">
           <ZapIcon className="size-4 text-emerald-400" aria-hidden="true" />
@@ -100,7 +101,14 @@ export default function SiteHeader() {
         )}
       </div>
 
-      <div className="flex h-10 flex-1 items-center justify-center">
+      {/* Tenant and KB Selection - Only show in multi-tenant mode */}
+      {multiTenantEnabled && (
+        <div className="shrink-0">
+          <TenantSelector hideTenantSelect />
+        </div>
+      )}
+
+      <div className="flex-1 flex items-center justify-center gap-4 min-w-0">
         <TabsNavigation />
         {isGuestMode && (
           <div className="ml-2 self-center px-2 py-1 text-xs bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200 rounded-md">
@@ -109,7 +117,7 @@ export default function SiteHeader() {
         )}
       </div>
 
-      <nav className="w-[200px] flex items-center justify-end">
+      <nav className="w-[200px] flex items-center justify-end shrink-0">
         <div className="flex items-center gap-2">
           {versionDisplay && (
             <TooltipProvider>
