@@ -1,0 +1,2 @@
+networkx
+# rich # Optional, for enhanced CLI output if needed
