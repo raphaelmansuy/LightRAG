@@ -50,6 +50,14 @@
 </div>
 
 ---
+## 🚀 Claude Skills (VSCode Copilot Dec 2025)
+
+This repository includes a suite of **Claude Skills** for automated reverse-engineering and architectural analysis. 
+
+- **[COPILOT_SKILLS_GUIDE.md](COPILOT_SKILLS_GUIDE.md)**: Quick start guide for using skills in VSCode Chat.
+- **[SKILLS.md](SKILLS.md)**: Technical specification and Master Prompt for AI agents.
+
+---
 ## 🎉 News
 - [2025.12]🎯[New Feature] **Enterprise Multi-Tenant Support**: Complete tenant isolation with RBAC, per-tenant knowledge bases, and full backward compatibility for single-tenant deployments.
 - [2025.11]🎯[New Feature]: Integrated **RAGAS for Evaluation** and **Langfuse for Tracing**. Updated the API to return retrieved contexts alongside query results to support context precision metrics.
